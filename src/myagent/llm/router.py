@@ -44,13 +44,26 @@ class LLMRouter:
 
     Attributes:
         config: LLM設定。
+        openai_api_key: OpenAI APIキー。未設定の場合はGeminiへ自動切替。
+        google_api_key: Google APIキー。
         token_usage: トークン使用量の累計。
     """
 
     config: LLMConfig
+    openai_api_key: str = ""
+    google_api_key: str = ""
     token_usage: TokenUsage = field(default_factory=TokenUsage)
     _primary: BaseChatModel | None = field(default=None, init=False, repr=False)
     _fallback: BaseChatModel | None = field(default=None, init=False, repr=False)
+
+    def _has_key_for_provider(self, provider: str) -> bool:
+        """指定プロバイダのAPIキーが有効な形式で設定されているか確認する."""
+        if provider == "openai":
+            # OpenAI キーは必ず "sk-" で始まる
+            return self.openai_api_key.startswith("sk-")
+        if provider == "gemini":
+            return bool(self.google_api_key)
+        return False
 
     def _create_model(
         self,
@@ -77,12 +90,28 @@ class LLMRouter:
 
     @property
     def primary(self) -> BaseChatModel:
-        """プライマリモデルを取得（遅延初期化）."""
+        """プライマリモデルを取得（遅延初期化）.
+
+        プライマリプロバイダのAPIキーが未設定で、フォールバックのキーが
+        設定されている場合はフォールバックプロバイダを自動的に使用する。
+        """
         if self._primary is None:
-            self._primary = self._create_model(
-                self.config.provider,
-                self.config.model,
-            )
+            provider = self.config.provider
+            model = self.config.model
+            if (
+                not self._has_key_for_provider(provider)
+                and self.config.fallback_provider
+                and self.config.fallback_model
+                and self._has_key_for_provider(self.config.fallback_provider)
+            ):
+                logger.info(
+                    "%s のAPIキーが未設定のため %s にフォールバック",
+                    provider,
+                    self.config.fallback_provider,
+                )
+                provider = self.config.fallback_provider
+                model = self.config.fallback_model
+            self._primary = self._create_model(provider, model)
         return self._primary
 
     @property
@@ -114,6 +143,14 @@ class LLMRouter:
                 return response
             except Exception as e:
                 last_error = e
+                error_str = str(e).lower()
+                # 認証エラー・無効なAPIキーはリトライしても無意味なので即座に再送出
+                auth_keywords = (
+                    "401", "403", "authentication",
+                    "api key", "invalid_api_key", "unauthorized",
+                )
+                if any(keyword in error_str for keyword in auth_keywords):
+                    raise
                 if attempt < self.config.max_retries - 1:
                     wait = 2**attempt
                     logger.warning(

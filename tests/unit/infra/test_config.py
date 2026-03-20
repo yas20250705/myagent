@@ -19,12 +19,12 @@ class TestLLMConfigのデフォルト値:
 
     def test_デフォルトモデルはgpt5_nano(self) -> None:
         config = LLMConfig()
-        assert config.model == "gpt5-nano"
+        assert config.model == "gpt-5-nano"
 
     def test_デフォルトフォールバックはgemini(self) -> None:
         config = LLMConfig()
         assert config.fallback_provider == "gemini"
-        assert config.fallback_model == "gemini-2.5-flash"
+        assert config.fallback_model == "gemini-3.1-flash-lite-preview"
 
     def test_デフォルトmax_retriesは3(self) -> None:
         config = LLMConfig()

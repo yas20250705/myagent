@@ -27,7 +27,7 @@ class LLMConfig(BaseModel):
     provider: Literal["openai", "gemini"] = "openai"
     model: str = "gpt-5-nano"
     fallback_provider: Literal["openai", "gemini"] | None = "gemini"
-    fallback_model: str | None = "gemini-2.5-flash"
+    fallback_model: str | None = "gemini-3.1-flash-lite-preview"
     max_retries: int = Field(default=3, ge=1, le=10)
     temperature: float = Field(default=0.0, ge=0.0, le=2.0)
 

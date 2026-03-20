@@ -14,6 +14,25 @@ from myagent.agent.events import AgentEvent
 
 console = Console()
 
+_active_spinner: Status | None = None
+
+
+def _start_spinner(tool_name: str) -> None:
+    """ツール実行中スピナーを開始する."""
+    global _active_spinner
+    _stop_spinner()
+    message = f"[cyan]{tool_name}[/cyan] を実行中..."
+    _active_spinner = console.status(message, spinner="dots")
+    _active_spinner.__enter__()
+
+
+def _stop_spinner() -> None:
+    """アクティブなスピナーを停止する."""
+    global _active_spinner
+    if _active_spinner is not None:
+        _active_spinner.__exit__(None, None, None)
+        _active_spinner = None
+
 
 def render_markdown(text: str) -> None:
     """Markdownテキストをレンダリングして表示する."""
@@ -98,11 +117,10 @@ def handle_event(event: AgentEvent) -> None:
     if event.event_type == "stream_token":
         print_token(event.data.get("token", ""))
     elif event.event_type == "tool_start":
-        print_tool_start(
-            event.data.get("tool_name", ""),
-            event.data.get("arguments", {}),
-        )
+        tool_name = event.data.get("tool_name", "")
+        _start_spinner(tool_name)
     elif event.event_type == "tool_end":
+        _stop_spinner()
         print_tool_end(
             event.data.get("tool_name", ""),
             event.data.get("result", ""),

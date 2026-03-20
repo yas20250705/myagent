@@ -23,7 +23,11 @@ from myagent.tools.registry import create_default_registry
 
 def _create_runner(config: AppConfig) -> AgentRunner:
     """設定からAgentRunnerを構築する."""
-    router = LLMRouter(config=config.llm)
+    router = LLMRouter(
+        config=config.llm,
+        openai_api_key=config.openai_api_key,
+        google_api_key=config.google_api_key,
+    )
     model = router.get_model_for_bind_tools()
     registry = create_default_registry()
     tools = registry.list_tools()

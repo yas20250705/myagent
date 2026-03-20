@@ -184,8 +184,18 @@ class AgentRunner:
         messages = result.get("messages", [])
         if messages:
             last = messages[-1]
-            if hasattr(last, "content") and isinstance(last.content, str):
-                return last.content
+            if hasattr(last, "content"):
+                content = last.content
+                if isinstance(content, str):
+                    return content
+                if isinstance(content, list):
+                    # Gemini形式: [{'type': 'text', 'text': '...'}]
+                    texts = [
+                        p.get("text", "")
+                        for p in content
+                        if isinstance(p, dict) and p.get("type") == "text"
+                    ]
+                    return "".join(texts) or "(回答なし)"
         return "(回答なし)"
 
     async def run_with_events(
@@ -217,12 +227,22 @@ class AgentRunner:
 
                 if kind == "on_chat_model_stream":
                     chunk = event.get("data", {}).get("chunk")
-                    if (
-                        chunk
-                        and hasattr(chunk, "content")
-                        and isinstance(chunk.content, str)
-                    ):
-                        yield AgentEvent.stream_token(chunk.content)
+                    if chunk and hasattr(chunk, "content"):
+                        content = chunk.content
+                        if isinstance(content, str) and content:
+                            # OpenAI形式: content は文字列
+                            yield AgentEvent.stream_token(content)
+                        elif isinstance(content, list):
+                            # Gemini形式: [{'type': 'text', 'text': '...'}]
+                            for part in content:
+                                is_text = (
+                                    isinstance(part, dict)
+                                    and part.get("type") == "text"
+                                )
+                                if is_text:
+                                    text = part.get("text", "")
+                                    if text:
+                                        yield AgentEvent.stream_token(text)
 
                 elif kind == "on_tool_start":
                     name = event.get("name", "")
