@@ -1,0 +1,9 @@
+{
+  "name": "claude-code-book-chapter8",
+  "image": "mcr.microsoft.com/devcontainers/python:3.12-bookworm",
+  "workspaceFolder": "/workspaces/claude-code-book-chapter8",
+  "features": {
+    "ghcr.io/anthropics/devcontainer-features/claude-code:1.0": {}
+  },
+  "postCreateCommand": "pip install uv && uv sync"
+}
