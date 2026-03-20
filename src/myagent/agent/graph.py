@@ -8,7 +8,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING, Any
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langgraph.graph import END, StateGraph
 from langgraph.prebuilt import ToolNode
 
@@ -19,6 +19,43 @@ from myagent.infra.errors import MyAgentError
 if TYPE_CHECKING:
     from langchain_core.language_models import BaseChatModel
     from langchain_core.tools import BaseTool
+
+_MAX_RECENT_MESSAGES = 20
+_MAX_CONTENT_CHARS = 8000
+
+
+def _truncate_messages(messages: list[BaseMessage]) -> list[BaseMessage]:
+    """トークン制限に対応するためメッセージ履歴を切り詰める.
+
+    SystemMessage と最初の HumanMessage は常に保持し、
+    それ以降は直近 _MAX_RECENT_MESSAGES 件に絞る。
+    各メッセージのコンテンツが長すぎる場合も切り詰める。
+    """
+    def _trim_content(msg: BaseMessage) -> BaseMessage:
+        if isinstance(msg.content, str) and len(msg.content) > _MAX_CONTENT_CHARS:
+            trimmed = msg.content[:_MAX_CONTENT_CHARS] + "\n...(省略)..."
+            return msg.model_copy(update={"content": trimmed})
+        return msg
+
+    if not messages:
+        return messages
+
+    # 先頭の SystemMessage / HumanMessage を固定枠として保持
+    fixed: list[BaseMessage] = []
+    rest_start = 0
+    for i, msg in enumerate(messages[:2]):
+        if isinstance(msg, (SystemMessage, HumanMessage)):
+            fixed.append(_trim_content(msg))
+            rest_start = i + 1
+        else:
+            break
+
+    rest = [_trim_content(m) for m in messages[rest_start:]]
+    if len(rest) > _MAX_RECENT_MESSAGES:
+        rest = rest[-_MAX_RECENT_MESSAGES:]
+
+    return fixed + rest
+
 
 SYSTEM_PROMPT = """あなたは高度なAIコーディングアシスタントです。
 ユーザーの指示に従い、利用可能なツールを使って作業を完了してください。
@@ -60,7 +97,7 @@ def build_agent_graph(
                 "is_completed": True,
             }
 
-        response = await model_with_tools.ainvoke(messages)
+        response = await model_with_tools.ainvoke(_truncate_messages(messages))
 
         return {
             "messages": messages + [response],
