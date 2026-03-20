@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Literal
 
 import tomli_w
+from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 
 from myagent.infra.errors import ConfigError
@@ -24,7 +25,7 @@ class LLMConfig(BaseModel):
     """LLMプロバイダ設定."""
 
     provider: Literal["openai", "gemini"] = "openai"
-    model: str = "gpt5-nano"
+    model: str = "gpt-5-nano"
     fallback_provider: Literal["openai", "gemini"] | None = "gemini"
     fallback_model: str | None = "gemini-2.5-flash"
     max_retries: int = Field(default=3, ge=1, le=10)
@@ -66,6 +67,8 @@ def load_config(config_path: Path | None = None) -> AppConfig:
     Raises:
         ConfigError: 設定ファイルの読み込みまたはパースに失敗した場合。
     """
+    load_dotenv()
+
     path = config_path or DEFAULT_CONFIG_PATH
     data: dict[str, object] = {}
 
