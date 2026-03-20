@@ -62,8 +62,8 @@ def config(ctx: click.Context) -> None:
 ### LLM
 - プロバイダ: {app_config.llm.provider}
 - モデル: {app_config.llm.model}
-- フォールバック: {app_config.llm.fallback_provider or 'なし'} \
-/ {app_config.llm.fallback_model or 'なし'}
+- フォールバック: {app_config.llm.fallback_provider or "なし"} \
+/ {app_config.llm.fallback_model or "なし"}
 - 最大リトライ: {app_config.llm.max_retries}
 - Temperature: {app_config.llm.temperature}
 
@@ -75,8 +75,8 @@ def config(ctx: click.Context) -> None:
 - 最大ループ回数: {app_config.agent.max_loops}
 
 ### APIキー
-- OpenAI: {'設定済み' if app_config.openai_api_key else '未設定'}
-- Google: {'設定済み' if app_config.google_api_key else '未設定'}
+- OpenAI: {"設定済み" if app_config.openai_api_key else "未設定"}
+- Google: {"設定済み" if app_config.google_api_key else "未設定"}
 """
     render_markdown(config_text)
 

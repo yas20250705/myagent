@@ -21,6 +21,8 @@ env/
 
 # Environment variables
 .env
+.env.*
+!.env.example
 .env.local
 .env.*.local
 
@@ -55,4 +57,33 @@ htmlcov/
 .steering/*
 !.steering/.gitkeep
 
+# Secrets / credentials / private keys
+*.pem
+*.key
+*.p12
+*.pfx
+*.cer
+id_rsa
+id_rsa.pub
+id_ed25519
+id_ed25519.pub
+id_dsa
+credentials.json
+credentials.csv
+*credentials*
+*secret*
+secrets.toml
+secrets.yaml
+secrets.json
+
+# Local databases (future session persistence)
+*.sqlite
+*.sqlite3
+*.db
+
+# Claude Code local settings
 .claude/settings.local.json
+
+# uv local environment config
+uv.toml
+

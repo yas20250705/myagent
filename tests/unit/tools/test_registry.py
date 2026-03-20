@@ -50,7 +50,9 @@ class TestToolRegistry:
 class Testcreate_default_registry:
     """create_default_registry 関数のテスト."""
 
-    def test_デフォルトレジストリに7つのツールが登録される(self, tmp_path: Path) -> None:
+    def test_デフォルトレジストリに7つのツールが登録される(
+        self, tmp_path: Path
+    ) -> None:
         registry = create_default_registry(project_root=tmp_path)
         tools = registry.list_tools()
         assert len(tools) == 7

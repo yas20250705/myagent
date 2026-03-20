@@ -42,11 +42,25 @@ class TestAppConfigのデフォルト値:
         assert config.openai_api_key == ""
         assert config.google_api_key == ""
 
+    def test_context_window_tokensのデフォルトは128000(self) -> None:
+        from myagent.infra.config import AgentConfig
+
+        config = AgentConfig()
+        assert config.context_window_tokens == 128_000
+
+    def test_context_window_tokensをカスタム値で設定できる(self) -> None:
+        from myagent.infra.config import AgentConfig
+
+        config = AgentConfig(context_window_tokens=50_000)
+        assert config.context_window_tokens == 50_000
+
 
 class Testload_config:
     """load_config 関数のテスト."""
 
-    def test_存在しないファイルからデフォルト設定を生成する(self, tmp_path: Path) -> None:
+    def test_存在しないファイルからデフォルト設定を生成する(
+        self, tmp_path: Path
+    ) -> None:
         config = load_config(tmp_path / "nonexistent.toml")
         assert config.llm.provider == "openai"
 
@@ -54,7 +68,7 @@ class Testload_config:
         config_path = tmp_path / "config.toml"
         config_path.write_text(
             '[llm]\nprovider = "gemini"\nmodel = "gemini-2.5-pro"\n'
-            'temperature = 0.5\nmax_retries = 2\n',
+            "temperature = 0.5\nmax_retries = 2\n",
             encoding="utf-8",
         )
         config = load_config(config_path)

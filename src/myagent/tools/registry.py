@@ -18,6 +18,8 @@ from myagent.tools.file_tools import (
     ReadFileTool,
     WriteFileTool,
 )
+from myagent.tools.path_security import AllowedDirectories
+from myagent.tools.shared_state import WorkingDirectory
 from myagent.tools.shell_tools import RunCommandTool
 
 
@@ -54,24 +56,44 @@ class ToolRegistry:
         return schemas
 
 
-def create_default_registry(project_root: Path | None = None) -> ToolRegistry:
+def create_default_registry(
+    project_root: Path | None = None,
+    extra_allowed_dirs: list[Path] | None = None,
+    initial_cwd: Path | None = None,
+) -> ToolRegistry:
     """デフォルトのツール一式を登録したレジストリを作成する.
 
     Args:
         project_root: プロジェクトルートパス。Noneの場合はカレントディレクトリ。
+        extra_allowed_dirs: 追加の許可ディレクトリ。
+        initial_cwd: 初期作業ディレクトリ。Noneの場合はproject_rootと同じ。
 
     Returns:
         全デフォルトツールが登録されたToolRegistry。
     """
     root = project_root or Path.cwd()
+    start_cwd = initial_cwd.resolve() if initial_cwd else root
+
+    # initial_cwd が extra_allowed_dirs に含まれていない場合は自動追加
+    extra = list(extra_allowed_dirs) if extra_allowed_dirs else []
+    if initial_cwd and not any(
+        start_cwd == d.resolve() or str(start_cwd).startswith(str(d.resolve()))
+        for d in [root] + extra
+    ):
+        extra.append(start_cwd)
+
+    allowed = AllowedDirectories(root, extra or None)
+    wd = WorkingDirectory(start_cwd)
     registry = ToolRegistry()
 
-    registry.register(ReadFileTool(project_root=root))
-    registry.register(WriteFileTool(project_root=root))
-    registry.register(EditFileTool(project_root=root))
-    registry.register(ListDirectoryTool(project_root=root))
-    registry.register(GlobSearchTool(project_root=root))
-    registry.register(GrepSearchTool(project_root=root))
-    registry.register(RunCommandTool())
+    registry.register(ReadFileTool(allowed_dirs=allowed, working_dir=wd))
+    registry.register(WriteFileTool(allowed_dirs=allowed, working_dir=wd))
+    registry.register(EditFileTool(allowed_dirs=allowed, working_dir=wd))
+    registry.register(ListDirectoryTool(allowed_dirs=allowed, working_dir=wd))
+    registry.register(GlobSearchTool(allowed_dirs=allowed, working_dir=wd))
+    registry.register(GrepSearchTool(allowed_dirs=allowed, working_dir=wd))
+    registry.register(
+        RunCommandTool(cwd=start_cwd, allowed_dirs=allowed, working_dir=wd)
+    )
 
     return registry

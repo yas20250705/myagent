@@ -8,15 +8,26 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING, Any
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
 from langgraph.graph import END, StateGraph
 from langgraph.prebuilt import ToolNode
 
+from myagent.agent.critic import Critic
 from myagent.agent.events import AgentEvent
+from myagent.agent.executor import Executor
 from myagent.agent.state import AgentState
+from myagent.infra.context import ContextManager
 from myagent.infra.errors import MyAgentError
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from langchain_core.language_models import BaseChatModel
     from langchain_core.tools import BaseTool
 
@@ -31,6 +42,7 @@ def _truncate_messages(messages: list[BaseMessage]) -> list[BaseMessage]:
     それ以降は直近 _MAX_RECENT_MESSAGES 件に絞る。
     各メッセージのコンテンツが長すぎる場合も切り詰める。
     """
+
     def _trim_content(msg: BaseMessage) -> BaseMessage:
         if isinstance(msg.content, str) and len(msg.content) > _MAX_CONTENT_CHARS:
             trimmed = msg.content[:_MAX_CONTENT_CHARS] + "\n...(省略)..."
@@ -68,6 +80,8 @@ def build_agent_graph(
     model: BaseChatModel,
     tools: list[BaseTool],
     max_loops: int = 20,
+    executor: Executor | None = None,
+    confirm_callback: Callable[[str, dict[str, Any]], bool] | None = None,
 ) -> StateGraph[AgentState]:
     """ReActエージェントのLangGraphステートマシンを構築する.
 
@@ -75,11 +89,14 @@ def build_agent_graph(
         model: ツールバインド済みのLLMモデル。
         tools: 利用可能なツール一覧。
         max_loops: 最大ループ回数。
+        executor: ツール確認フローを管理するExecutor。Noneの場合は確認なし。
+        confirm_callback: ユーザー確認を求めるコールバック。承認でTrue、拒否でFalse。
 
     Returns:
         コンパイル済みのStateGraph。
     """
     model_with_tools = model.bind_tools(tools)
+    critic = Critic()
 
     async def agent_node(state: AgentState) -> dict[str, Any]:
         """LLMを呼び出しツール使用を判断するノード."""
@@ -88,11 +105,18 @@ def build_agent_graph(
 
         if loop_count >= max_loops:
             limit_msg = (
-                f"最大ループ回数({max_loops})に達しました。"
-                "現時点の結果をまとめます。"
+                f"最大ループ回数({max_loops})に達しました。現時点の結果をまとめます。"
             )
             return {
                 "messages": messages + [AIMessage(content=limit_msg)],
+                "loop_count": loop_count,
+                "is_completed": True,
+            }
+
+        if critic.detect_loop(messages):
+            loop_msg = "同一ツール呼び出しの繰り返しを検知しました。処理を中断します。"
+            return {
+                "messages": messages + [AIMessage(content=loop_msg)],
                 "loop_count": loop_count,
                 "is_completed": True,
             }
@@ -121,11 +145,48 @@ def build_agent_graph(
     tool_node = ToolNode(tools)
 
     def tool_node_wrapper(state: AgentState) -> dict[str, Any]:
-        """ツールノードのラッパー。実行後にagentノードに戻す。"""
-        result = tool_node.invoke(state)
+        """ツールノードのラッパー。確認フローを経てツールを実行する。"""
         messages = state.get("messages", [])
-        new_messages = result.get("messages", [])
-        return {"messages": messages + new_messages}
+        last_message = messages[-1] if messages else None
+        tool_calls = getattr(last_message, "tool_calls", []) if last_message else []
+
+        denied_messages: list[ToolMessage] = []
+        approved_calls: list[dict[str, Any]] = []
+
+        for tc in tool_calls:
+            tool_name: str = tc["name"]
+            tool_args: dict[str, Any] = tc["args"]
+            tool_call_id: str = tc["id"]
+
+            needs_confirm = executor is not None and executor.should_confirm(
+                tool_name, tool_args
+            )
+            if needs_confirm:
+                cb = confirm_callback
+                approved = cb(tool_name, tool_args) if cb else True
+                if not approved:
+                    denied_messages.append(
+                        ToolMessage(
+                            content="ユーザーがこの操作を拒否しました。",
+                            tool_call_id=tool_call_id,
+                            name=tool_name,
+                        )
+                    )
+                    continue
+
+            approved_calls.append(tc)
+
+        if approved_calls and last_message is not None:
+            modified_last = last_message.model_copy(
+                update={"tool_calls": approved_calls}
+            )
+            modified_state = {**state, "messages": messages[:-1] + [modified_last]}
+            result = tool_node.invoke(modified_state)
+            new_messages: list[BaseMessage] = result.get("messages", [])
+        else:
+            new_messages = []
+
+        return {"messages": messages + denied_messages + new_messages}
 
     graph = StateGraph(AgentState)
     graph.add_node("agent", agent_node)
@@ -142,6 +203,7 @@ class AgentRunner:
     """エージェントの実行を管理するランナー.
 
     グラフの構築・実行とイベント発行を担当する。
+    ターン間のメッセージ履歴を保持し、マルチターン会話を実現する。
     """
 
     def __init__(
@@ -149,9 +211,68 @@ class AgentRunner:
         model: BaseChatModel,
         tools: list[BaseTool],
         max_loops: int = 20,
+        executor: Executor | None = None,
+        confirm_callback: Callable[[str, dict[str, Any]], bool] | None = None,
+        context_manager: ContextManager | None = None,
     ) -> None:
-        self._graph = build_agent_graph(model, tools, max_loops)
+        self._model = model
+        self._context_manager = context_manager
+        self._graph = build_agent_graph(
+            model, tools, max_loops, executor, confirm_callback
+        )
         self._compiled = self._graph.compile()
+        # ターン間で引き継ぐメッセージ履歴（SystemMessage + 会話全体）
+        self._history: list[BaseMessage] = []
+
+    def clear_history(self) -> None:
+        """会話履歴をリセットする."""
+        self._history = []
+
+    def _build_initial_messages(self, instruction: str) -> list[BaseMessage]:
+        """履歴に新しいユーザー指示を加えた初期メッセージリストを生成する.
+
+        初回ターンの場合、project_index が設定されていれば SystemMessage に注入する。
+        """
+        if self._history:
+            return list(self._history) + [HumanMessage(content=instruction)]
+        # 初回ターン: project_index があれば SystemMessage に注入
+        system_content = SYSTEM_PROMPT
+        if (
+            self._context_manager is not None
+            and self._context_manager.project_index is not None
+        ):
+            system_content = (
+                SYSTEM_PROMPT
+                + "\n\n## プロジェクト構造\n\n"
+                + self._context_manager.project_index
+            )
+        return [
+            SystemMessage(content=system_content),
+            HumanMessage(content=instruction),
+        ]
+
+    def _update_history(self, final_messages: list[BaseMessage]) -> None:
+        """実行結果のメッセージ履歴を保存する."""
+        if final_messages:
+            self._history = list(final_messages)
+
+    async def _maybe_compress_history(self) -> None:
+        """必要に応じて会話履歴をコンテキスト圧縮する.
+
+        ContextManager が設定されており、履歴が圧縮閾値を超えている場合に
+        LLM を使って古い会話を要約・圧縮する。
+        """
+        if (
+            self._context_manager is None
+            or not self._history
+            or not self._context_manager.needs_compression(self._history)
+        ):
+            return
+
+        compressed = await self._context_manager.compress_messages(
+            self._history, self._model
+        )
+        self._history = compressed
 
     async def run(self, instruction: str) -> str:
         """指示を実行し、最終回答を返す.
@@ -165,11 +286,10 @@ class AgentRunner:
         Raises:
             MyAgentError: エージェント実行中にエラーが発生した場合。
         """
+        await self._maybe_compress_history()
+
         initial_state: AgentState = {
-            "messages": [
-                SystemMessage(content=SYSTEM_PROMPT),
-                HumanMessage(content=instruction),
-            ],
+            "messages": self._build_initial_messages(instruction),
             "phase": "planning",
             "loop_count": 0,
             "is_completed": False,
@@ -182,6 +302,8 @@ class AgentRunner:
             raise MyAgentError(msg) from e
 
         messages = result.get("messages", [])
+        self._update_history(messages)
+
         if messages:
             last = messages[-1]
             if hasattr(last, "content"):
@@ -198,9 +320,7 @@ class AgentRunner:
                     return "".join(texts) or "(回答なし)"
         return "(回答なし)"
 
-    async def run_with_events(
-        self, instruction: str
-    ) -> AsyncIterator[AgentEvent]:
+    async def run_with_events(self, instruction: str) -> AsyncIterator[AgentEvent]:
         """指示を実行し、イベントをストリーミングで返す.
 
         Args:
@@ -209,15 +329,19 @@ class AgentRunner:
         Yields:
             エージェントイベント。
         """
+        await self._maybe_compress_history()
+
         initial_state: AgentState = {
-            "messages": [
-                SystemMessage(content=SYSTEM_PROMPT),
-                HumanMessage(content=instruction),
-            ],
+            "messages": self._build_initial_messages(instruction),
             "phase": "planning",
             "loop_count": 0,
             "is_completed": False,
         }
+
+        _prompt_tokens = 0
+        _completion_tokens = 0
+        _model_name = ""
+        _final_messages: list[BaseMessage] = []
 
         try:
             async for event in self._compiled.astream_events(
@@ -244,6 +368,18 @@ class AgentRunner:
                                     if text:
                                         yield AgentEvent.stream_token(text)
 
+                elif kind == "on_chat_model_end":
+                    output = event.get("data", {}).get("output")
+                    if output and hasattr(output, "usage_metadata"):
+                        usage = output.usage_metadata
+                        if isinstance(usage, dict):
+                            _prompt_tokens += usage.get("input_tokens", 0)
+                            _completion_tokens += usage.get("output_tokens", 0)
+                    if not _model_name:
+                        _model_name = event.get("metadata", {}).get(
+                            "ls_model_name", ""
+                        ) or event.get("name", "")
+
                 elif kind == "on_tool_start":
                     name = event.get("name", "")
                     inputs: dict[str, Any] = event.get("data", {}).get("input", {})
@@ -255,8 +391,25 @@ class AgentRunner:
                     output_str = str(output) if not isinstance(output, str) else output
                     yield AgentEvent.tool_end(name, output_str)
 
+                elif kind == "on_chain_end":
+                    # name == "LangGraph" がトップレベルグラフの完了イベント
+                    # ノード単位の on_chain_end（name == "agent" 等）は除外
+                    if event.get("name") == "LangGraph":
+                        output = event.get("data", {}).get("output", {})
+                        if isinstance(output, dict):
+                            msgs = output.get("messages", [])
+                            if msgs:
+                                _final_messages = msgs
+
         except Exception as e:
             yield AgentEvent.agent_error(str(e))
             return
 
-        yield AgentEvent.agent_complete("実行完了")
+        self._update_history(_final_messages)
+
+        yield AgentEvent.agent_complete(
+            "実行完了",
+            prompt_tokens=_prompt_tokens,
+            completion_tokens=_completion_tokens,
+            model_name=_model_name,
+        )

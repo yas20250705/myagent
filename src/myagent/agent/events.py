@@ -66,11 +66,22 @@ class AgentEvent:
         )
 
     @staticmethod
-    def agent_complete(final_answer: str) -> AgentEvent:
+    def agent_complete(
+        final_answer: str,
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
+        model_name: str = "",
+    ) -> AgentEvent:
         """エージェント完了イベントを作成する."""
         return AgentEvent(
             event_type="agent_complete",
-            data={"final_answer": final_answer},
+            data={
+                "final_answer": final_answer,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens,
+                "model_name": model_name,
+            },
         )
 
     @staticmethod

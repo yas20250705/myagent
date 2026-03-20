@@ -22,6 +22,7 @@ class TestCreate_runner:
 
             with patch("myagent.cli.app.AgentRunner") as mock_runner_cls:
                 from myagent.cli.app import _create_runner
+
                 _create_runner(config)
                 mock_runner_cls.assert_called_once()
 
@@ -45,6 +46,7 @@ class TestRun_oneshot:
             with patch("myagent.cli.app.handle_event") as mock_handle:
                 with patch("myagent.cli.app.console"):
                     from myagent.cli.app import run_oneshot
+
                     await run_oneshot(config, "テスト指示")
                     mock_handle.assert_called()
 
@@ -63,5 +65,6 @@ class TestRun_oneshot:
             with patch("myagent.cli.app.print_error") as mock_print_error:
                 with patch("myagent.cli.app.console"):
                     from myagent.cli.app import run_oneshot
+
                     await run_oneshot(config, "エラーを起こして")
                     mock_print_error.assert_called_once()

@@ -53,9 +53,7 @@ class TestSetConfigコマンドの設定変更:
         with patch("myagent.cli.commands.load_config", return_value=config):
             with patch("myagent.cli.commands.save_config") as mock_save:
                 with patch("myagent.cli.commands.print_success"):
-                    result = runner.invoke(
-                        cli, ["set-config", "--provider", "gemini"]
-                    )
+                    result = runner.invoke(cli, ["set-config", "--provider", "gemini"])
                     if result.exit_code == 0:
                         mock_save.assert_called_once()
                         assert config.llm.provider == "gemini"

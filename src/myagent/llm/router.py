@@ -146,8 +146,12 @@ class LLMRouter:
                 error_str = str(e).lower()
                 # 認証エラー・無効なAPIキーはリトライしても無意味なので即座に再送出
                 auth_keywords = (
-                    "401", "403", "authentication",
-                    "api key", "invalid_api_key", "unauthorized",
+                    "401",
+                    "403",
+                    "authentication",
+                    "api key",
+                    "invalid_api_key",
+                    "unauthorized",
                 )
                 if any(keyword in error_str for keyword in auth_keywords):
                     raise

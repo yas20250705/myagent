@@ -41,6 +41,25 @@ class TestAgentEventのファクトリメソッド:
         assert event.event_type == "agent_complete"
         assert event.data["final_answer"] == "作業完了しました"
 
+    def test_agent_completeデフォルト引数でトークン情報がゼロになる(self) -> None:
+        event = AgentEvent.agent_complete("完了")
+        assert event.data["prompt_tokens"] == 0
+        assert event.data["completion_tokens"] == 0
+        assert event.data["total_tokens"] == 0
+        assert event.data["model_name"] == ""
+
+    def test_agent_completeにトークン情報が格納される(self) -> None:
+        event = AgentEvent.agent_complete(
+            "完了",
+            prompt_tokens=100,
+            completion_tokens=50,
+            model_name="gpt-4o-mini",
+        )
+        assert event.data["prompt_tokens"] == 100
+        assert event.data["completion_tokens"] == 50
+        assert event.data["total_tokens"] == 150
+        assert event.data["model_name"] == "gpt-4o-mini"
+
     def test_agent_errorイベントを生成できる(self) -> None:
         event = AgentEvent.agent_error("LLM呼び出し失敗")
         assert event.event_type == "agent_error"

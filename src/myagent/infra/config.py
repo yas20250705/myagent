@@ -37,12 +37,15 @@ class ToolConfig(BaseModel):
 
     confirmation_level: ConfirmationLevel = "normal"
     max_output_lines: int = Field(default=200, ge=1)
+    allowed_directories: list[str] = Field(default_factory=list)
+    working_directory: str = ""
 
 
 class AgentConfig(BaseModel):
     """エージェント設定."""
 
     max_loops: int = Field(default=20, ge=1, le=100)
+    context_window_tokens: int = Field(default=128_000, ge=1_000)
 
 
 class AppConfig(BaseModel):

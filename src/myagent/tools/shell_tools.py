@@ -1,19 +1,25 @@
 """シェルコマンド実行ツール.
 
-危険コマンドの検知とブロック機能を提供する。
+危険コマンドの検知とブロック機能、作業ディレクトリ追跡を提供する。
 """
 
 from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import os
 import re
+import sys
+import tempfile
+from pathlib import Path
 from typing import Any
 
 from langchain_core.tools import BaseTool
-from pydantic import Field
+from pydantic import ConfigDict, Field
 
 from myagent.infra.errors import SecurityError, ToolExecutionError
+from myagent.tools.path_security import AllowedDirectories
+from myagent.tools.shared_state import WorkingDirectory
 
 DANGEROUS_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"\brm\s+-rf\s+/"),
@@ -30,6 +36,38 @@ DANGEROUS_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"\bgit\s+reset\s+--hard"),
 ]
 
+_CWD_SENTINEL = "__MYAGENT_CWD__"
+
+# Unix → Windows cmd.exe コマンド変換テーブル
+_UNIX_TO_WINDOWS: dict[str, str] = {
+    "pwd": "echo %CD%",
+    "ls": "dir",
+    "clear": "cls",
+    "which": "where",
+    "cat": "type",
+    "cp": "copy",
+    "mv": "move",
+    "rm": "del",
+    "mkdir -p": "mkdir",
+    "touch": "type nul >",
+}
+
+
+def _translate_for_windows(command: str) -> str:
+    """Unix系コマンドをWindows cmd.exe 互換コマンドに変換する.
+
+    完全一致または先頭一致で変換する。
+    """
+    stripped = command.strip()
+    # 完全一致
+    if stripped in _UNIX_TO_WINDOWS:
+        return _UNIX_TO_WINDOWS[stripped]
+    # 先頭のコマンド部分が一致する場合（引数付き）
+    for unix_cmd, win_cmd in _UNIX_TO_WINDOWS.items():
+        if stripped.startswith(unix_cmd + " "):
+            return win_cmd + stripped[len(unix_cmd) :]
+    return command
+
 
 def is_dangerous_command(command: str) -> bool:
     """コマンドが危険なパターンに一致するか判定する."""
@@ -39,15 +77,51 @@ def is_dangerous_command(command: str) -> bool:
     return False
 
 
+def _wrap_with_cwd_capture(command: str) -> str:
+    """コマンドの末尾にcwd取得コードを付加する (Unix用).
+
+    実行後の作業ディレクトリをsentinelフォーマットで stdout に出力する。
+    Windows ではバッチファイル方式を使用するため、この関数は呼ばれない。
+    """
+    return f"{command}\nprintf '\\n{_CWD_SENTINEL}:%s' \"$(pwd)\""
+
+
+def _parse_cwd_from_output(output: str) -> tuple[str, str | None]:
+    """stdout からsentinel行を抽出し、除去済み出力と新cwdを返す.
+
+    Args:
+        output: サブプロセスの stdout 文字列。
+
+    Returns:
+        (sentinel除去済み出力, 新cwd文字列 または None)
+    """
+    prefix = f"{_CWD_SENTINEL}:"
+    lines = output.splitlines()
+    cleaned: list[str] = []
+    new_cwd: str | None = None
+    for line in lines:
+        if line.strip().startswith(prefix):
+            new_cwd = line.strip()[len(prefix) :]
+        else:
+            cleaned.append(line)
+    return "\n".join(cleaned), new_cwd
+
+
 class RunCommandTool(BaseTool):
     """シェルコマンドを実行するツール."""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
     name: str = "run_command"
     description: str = (
         "シェルコマンドを実行する。"
         "commandに実行するコマンド文字列を指定する。"
+        "cdコマンドで作業ディレクトリを変更できる。"
     )
     timeout_seconds: int = Field(default=120, ge=1, le=600)
+    cwd: Path = Field(default_factory=Path.cwd)
+    allowed_dirs: AllowedDirectories | None = None
+    working_dir: WorkingDirectory | None = None
 
     def _run(self, command: str, **_kwargs: Any) -> str:
         if is_dangerous_command(command):
@@ -60,31 +134,89 @@ class RunCommandTool(BaseTool):
 
     async def _execute(self, command: str) -> str:
         """コマンドを非同期で実行する."""
+        if sys.platform == "win32":
+            return await self._execute_windows(command)
+        return await self._execute_unix(command)
+
+    async def _execute_unix(self, command: str) -> str:
+        """Unix系でコマンドを実行する."""
+        wrapped = _wrap_with_cwd_capture(command)
+        return await self._run_subprocess(wrapped)
+
+    async def _execute_windows(self, command: str) -> str:
+        """Windowsでバッチファイル経由でコマンドを実行する.
+
+        バッチファイルにより:
+        - 元コマンドの exit code を保持
+        - %CD% で cd 後のディレクトリを正しく取得
+        """
+        command = _translate_for_windows(command)
+        bat_path: str | None = None
+        try:
+            fd, bat_path = tempfile.mkstemp(suffix=".bat")
+            bat_content = (
+                f"@{command}\r\n"
+                f"@set __EC=%ERRORLEVEL%\r\n"
+                f"@echo {_CWD_SENTINEL}:%CD%\r\n"
+                "@exit /b %__EC%\r\n"
+            )
+            os.write(fd, bat_content.encode("mbcs", errors="replace"))
+            os.close(fd)
+            return await self._run_subprocess(bat_path)
+        finally:
+            if bat_path and os.path.exists(bat_path):
+                os.unlink(bat_path)
+
+    async def _run_subprocess(self, shell_command: str) -> str:
+        """サブプロセスを実行して結果を返す共通処理."""
         try:
             process = await asyncio.create_subprocess_shell(
-                command,
+                shell_command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                cwd=str(self.cwd),
             )
             stdout, stderr = await asyncio.wait_for(
                 process.communicate(),
                 timeout=self.timeout_seconds,
             )
         except TimeoutError as e:
-            msg = (
-                f"コマンドがタイムアウトしました"
-                f" ({self.timeout_seconds}秒): {command}"
-            )
+            msg = f"コマンドがタイムアウトしました ({self.timeout_seconds}秒)"
             raise ToolExecutionError(msg) from e
         except Exception as e:
             msg = f"コマンド実行に失敗しました: {e}"
             raise ToolExecutionError(msg) from e
 
+        # Windows はシステムコードページ(CP932等)のため mbcs を使用
+        enc = "mbcs" if sys.platform == "win32" else "utf-8"
+
         output_parts: list[str] = []
         if stdout:
-            output_parts.append(stdout.decode("utf-8", errors="replace"))
+            raw_stdout, new_cwd = _parse_cwd_from_output(
+                stdout.decode(enc, errors="replace")
+            )
+            if new_cwd:
+                try:
+                    candidate = Path(new_cwd.strip())
+                    if candidate.is_dir():
+                        if (
+                            self.allowed_dirs
+                            and not self.allowed_dirs.is_within_allowed(candidate)
+                        ):
+                            output_parts.append(
+                                "[警告] 許可ディレクトリ外への移動は制限されています"
+                            )
+                        else:
+                            self.cwd = candidate
+                            if self.working_dir is not None:
+                                self.working_dir.path = candidate
+                except OSError:
+                    pass
+            if raw_stdout.strip():
+                output_parts.append(raw_stdout)
         if stderr:
-            output_parts.append(f"[stderr]\n{stderr.decode('utf-8', errors='replace')}")
+            stderr_text = stderr.decode(enc, errors="replace")
+            output_parts.append(f"[stderr]\n{stderr_text}")
         if process.returncode != 0:
             output_parts.append(f"[exit code: {process.returncode}]")
 
