@@ -257,7 +257,8 @@ REPL 内からエージェントを経由せず直接実行できる管理コマ
 | `/skill list` | スキル一覧を表示する |
 | `/skill info <skill-name>` | スキルの詳細情報を表示する |
 | `/skill validate <path>` | SKILL.md を検証する |
-| `/skill install <git-url-or-path>` | スキルをインストールする |
+| `/skill install <git-url-or-path>` | スキルをグローバル（`~/.myagent/skills`）にインストールする |
+| `/skill install <git-url-or-path> --local` | スキルをプロジェクトローカルにインストールする |
 | `/skill uninstall <skill-name>` | スキルを削除する |
 
 #### カスタムコマンド管理
@@ -388,12 +389,21 @@ search_backends = ["exa", "duckduckgo"]
 timeout = 30
 max_size_bytes = 5242880           # 5MB
 
+# MCPサーバーは [[mcp.servers]] で追記（[mcp] に servers=[] と書かないこと）
 [[mcp.servers]]
-name = "example"
+name = "filesystem"
 transport = "stdio"                # "stdio" or "http"
 command = "npx"
 args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
 timeout = 30
+
+# 複数サーバーは [[mcp.servers]] を繰り返す
+[[mcp.servers]]
+name = "playwright"
+transport = "stdio"
+command = "npx"
+args = ["@playwright/mcp"]
+timeout = 120
 ```
 
 ---
@@ -501,13 +511,18 @@ myagent> ワークフローを実行して   # キーワードマッチによる
 uv run myagent skill list
 uv run myagent skill info <skill-name>
 uv run myagent skill validate <path>
-uv run myagent skill install <git-url-or-path>
+uv run myagent skill install <git-url-or-path>          # グローバル（~/.myagent/skills）
+uv run myagent skill install <git-url-or-path> --local  # プロジェクトローカル
 uv run myagent skill uninstall <skill-name>
 
 # REPL内でも同様に実行可能
 myagent> /skill list
 myagent> /skill info my-workflow
+myagent> /skill install https://github.com/example/skill-repo
+myagent> /skill install https://github.com/example/skill-repo --local
 ```
+
+> **インストール先**: デフォルトはグローバル（`~/.myagent/skills/`）です。`--local` を指定するとプロジェクトの `.myagent/skills/` にインストールされます。同名スキルはプロジェクトローカルが優先されます。
 
 ---
 
@@ -520,7 +535,7 @@ myagent> /skill info my-workflow
 ```bash
 # CLIサブコマンド
 uv run myagent plugin list
-uv run myagent plugin install <git-url-or-path>
+uv run myagent plugin install <git-url-or-path>   # ~/.myagent/plugins/cache/ にインストール
 uv run myagent plugin uninstall <name>
 uv run myagent plugin enable <name>
 uv run myagent plugin disable <name>
@@ -528,8 +543,11 @@ uv run myagent plugin validate [path]
 
 # REPL内でも同様に実行可能
 myagent> /plugin list
+myagent> /plugin install https://github.com/example/plugin-repo
 myagent> /plugin enable my-plugin
 ```
+
+> **インストール先**: プラグインは常に `~/.myagent/plugins/cache/`（ユーザースコープ）にインストールされます。CLIには `--scope` オプションがありますが、現在は `user` スコープのみ有効です。
 
 ### プラグインの有効化
 
@@ -560,6 +578,40 @@ name = "my-api"
 transport = "http"
 url = "http://localhost:8080"
 timeout = 60
+```
+
+> **注意**: `[mcp]` セクションに `servers = []` と書いた後に `[[mcp.servers]]` を追記するとTOMLパースエラーになります。`servers = []` の行は削除し、`[[mcp.servers]]` だけで定義してください。
+
+### Playwright MCPの設定例
+
+ブラウザ操作を行うPlaywright MCPサーバーを使う場合:
+
+```bash
+# Playwrightブラウザのインストール（初回のみ）
+npx playwright install chromium
+```
+
+```toml
+[[mcp.servers]]
+name = "playwright"
+transport = "stdio"
+command = "npx"
+args = ["@playwright/mcp"]
+timeout = 120
+```
+
+接続すると `mcp_playwright_browser_navigate`、`mcp_playwright_browser_snapshot`、`mcp_playwright_browser_click` などのツールが使えるようになります。
+
+#### Playwrightで継続操作する場合の注意
+
+エージェントがブラウザ操作の提案を「完了しました」で終えた後に続けて操作する場合は、**ブラウザのコンテキストを明示**してください。
+
+```
+# NG（文脈が途切れ、ブラウザと無関係なツールが呼ばれることがある）
+myagent> 「ホエイプロテイン」で絞り込み
+
+# OK（Playwrightの文脈を明示する）
+myagent> Playwrightで今開いているGoogleの検索バーに「ホエイプロテイン」を入力して再検索して
 ```
 
 ### 接続状態の確認
@@ -769,6 +821,46 @@ ls .myagent/commands/
 ### スキルが自動マッチしない
 
 スキルの `description` フィールドに関連キーワードを充実させてください（`SKILL.md` のフロントマター）。
+
+### MCPサーバーの設定でパースエラーが出る
+
+```
+Cannot mutate immutable namespace ('mcp', 'servers')
+```
+
+このエラーは `[mcp]` セクション内に `servers = []` と書いた後、`[[mcp.servers]]` で追記した場合に発生します。
+
+**修正**: `servers = []` の行を削除します。
+
+```toml
+# NG
+[mcp]
+servers = []
+
+[[mcp.servers]]
+name = "playwright"
+...
+
+# OK
+[mcp]
+
+[[mcp.servers]]
+name = "playwright"
+...
+```
+
+### MCPツールで "There is no current event loop" エラーが出る
+
+古いバージョンで発生する問題です。`graph.py` の `tool_node_wrapper` が同期関数だった場合に起きます。最新版では `async def` に修正済みです。
+
+### スキルをインストールしたが `/skill list` に表示されない
+
+インストール先とスキルの検索先が一致しているか確認してください。
+
+- `/skill install`（デフォルト）: `~/.myagent/skills/` にインストール
+- `/skill install --local`: `<カレントディレクトリ>/.myagent/skills/` にインストール
+
+`/skill list` はグローバル（`~/.myagent/skills/`）とプロジェクトローカル（`.myagent/skills/`）の両方を検索します。`config.toml` の `global_skills_dir` を設定している場合はその場所も確認してください。
 
 ### LangSmithにトレースが記録されない
 

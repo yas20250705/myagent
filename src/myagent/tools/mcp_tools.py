@@ -341,11 +341,11 @@ class MCPToolWrapper(BaseTool):
 
     async def _arun(self, *args: Any, **kwargs: Any) -> str:
         """非同期でMCPツールを実行する."""
-        # kwargsをそのままargumentsとして渡す
+        # kwargsをargumentsとして渡す（None値はオプショナルパラメータの未指定を意味するため除外）
         arguments: dict[str, Any] = {}
         if args:
             arguments["input"] = args[0] if len(args) == 1 else list(args)
-        arguments.update(kwargs)
+        arguments.update({k: v for k, v in kwargs.items() if v is not None})
 
         try:
             return await self.mcp_client.call_tool(self.mcp_tool_name, arguments)

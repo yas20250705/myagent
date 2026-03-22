@@ -50,10 +50,12 @@ def print_token(token: str) -> None:
 
 def print_tool_start(tool_name: str, arguments: dict[str, object]) -> None:
     """ツール実行開始を表示する."""
+    from rich.markup import escape
+
     args_str = ", ".join(f"{k}={v!r}" for k, v in arguments.items())
     console.print(
         Panel(
-            f"[bold cyan]{tool_name}[/bold cyan]({args_str})",
+            f"[bold cyan]{escape(tool_name)}[/bold cyan]({escape(args_str)})",
             title="Tool",
             border_style="cyan",
         )
@@ -62,6 +64,8 @@ def print_tool_start(tool_name: str, arguments: dict[str, object]) -> None:
 
 def print_tool_end(tool_name: str, result: str, is_success: bool = True) -> None:
     """ツール実行結果を表示する."""
+    from rich.markup import escape
+
     style = "green" if is_success else "red"
     status = "OK" if is_success else "ERROR"
     # 結果が長い場合はトランケート
@@ -71,8 +75,8 @@ def print_tool_end(tool_name: str, result: str, is_success: bool = True) -> None
         display_result = "\n".join(lines[:20]) + f"\n... ({len(lines) - 20}行省略)"
     console.print(
         Panel(
-            display_result,
-            title=f"{tool_name} [{status}]",
+            escape(display_result),
+            title=f"{escape(tool_name)} [{status}]",
             border_style=style,
         )
     )

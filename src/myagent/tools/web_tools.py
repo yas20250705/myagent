@@ -599,6 +599,8 @@ def _html_to_text(html: str) -> str:
         return converter.handle(html)
     except ImportError:
         return _simple_strip_tags(html)
+    except Exception:
+        return _simple_strip_tags(html)
 
 
 def _html_to_markdown(html: str, url: str = "") -> str:
@@ -613,6 +615,8 @@ def _html_to_markdown(html: str, url: str = "") -> str:
         converter.baseurl = url
         return converter.handle(html)
     except ImportError:
+        return _simple_strip_tags(html)
+    except Exception:
         return _simple_strip_tags(html)
 
 

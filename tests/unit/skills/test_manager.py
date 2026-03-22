@@ -35,7 +35,11 @@ class TestSkillManagerLoadAll:
         project_dir = tmp_path / "project" / "skills"
         _make_skill(project_dir, "my-skill", "テストスキル")
 
-        manager = SkillManager(project_skills_dir=project_dir)
+        # global_skills_dir を明示指定してシステムのグローバルスキルを分離
+        manager = SkillManager(
+            project_skills_dir=project_dir,
+            global_skills_dir=tmp_path / "no-global",
+        )
         skills = manager.load_all()
 
         assert len(skills) == 1
@@ -77,7 +81,10 @@ class TestSkillManagerLoadAll:
         _make_skill(project_dir, "skill-a", "スキルA")
         _make_skill(project_dir, "skill-b", "スキルB")
 
-        manager = SkillManager(project_skills_dir=project_dir)
+        manager = SkillManager(
+            project_skills_dir=project_dir,
+            global_skills_dir=tmp_path / "no-global",
+        )
         skills = manager.load_all()
 
         assert len(skills) == 2
@@ -93,7 +100,10 @@ class TestSkillManagerLoadAll:
         bad_dir.mkdir()
         (bad_dir / "SKILL.md").write_text("フロントマターなし", encoding="utf-8")
 
-        manager = SkillManager(project_skills_dir=project_dir)
+        manager = SkillManager(
+            project_skills_dir=project_dir,
+            global_skills_dir=tmp_path / "no-global",
+        )
         skills = manager.load_all()
 
         assert len(skills) == 1
@@ -104,14 +114,20 @@ class TestSkillManagerLoadAll:
         empty_dir = tmp_path / "empty"
         empty_dir.mkdir()
 
-        manager = SkillManager(project_skills_dir=empty_dir)
+        manager = SkillManager(
+            project_skills_dir=empty_dir,
+            global_skills_dir=tmp_path / "no-global",
+        )
         skills = manager.load_all()
 
         assert skills == []
 
     def test_nonexistent_dir_returns_empty(self, tmp_path: Path) -> None:
         """存在しないディレクトリは空リストを返すこと."""
-        manager = SkillManager(project_skills_dir=tmp_path / "not-exist")
+        manager = SkillManager(
+            project_skills_dir=tmp_path / "not-exist",
+            global_skills_dir=tmp_path / "no-global",
+        )
         skills = manager.load_all()
 
         assert skills == []
@@ -125,7 +141,10 @@ class TestSkillManagerGetMetadata:
         project_dir = tmp_path / "skills"
         _make_skill(project_dir, "my-skill", "テストスキル")
 
-        manager = SkillManager(project_skills_dir=project_dir)
+        manager = SkillManager(
+            project_skills_dir=project_dir,
+            global_skills_dir=tmp_path / "no-global",
+        )
         meta = manager.get_metadata("my-skill")
 
         assert meta is not None
@@ -148,7 +167,10 @@ class TestSkillManagerActivate:
         project_dir = tmp_path / "skills"
         _make_skill(project_dir, "my-skill", "テストスキル")
 
-        manager = SkillManager(project_skills_dir=project_dir)
+        manager = SkillManager(
+            project_skills_dir=project_dir,
+            global_skills_dir=tmp_path / "no-global",
+        )
         skill = manager.activate("my-skill")
 
         assert skill is not None
@@ -175,7 +197,10 @@ class TestSkillManagerFindMatching:
         )
         _make_skill(project_dir, "deploy", "デプロイを実行するスキル")
 
-        manager = SkillManager(project_skills_dir=project_dir)
+        manager = SkillManager(
+            project_skills_dir=project_dir,
+            global_skills_dir=tmp_path / "no-global",
+        )
         matches = manager.find_matching("コードレビューをお願いします")
 
         assert len(matches) >= 1
@@ -186,7 +211,10 @@ class TestSkillManagerFindMatching:
         project_dir = tmp_path / "skills"
         _make_skill(project_dir, "code-review", "コードレビューを実行するスキル")
 
-        manager = SkillManager(project_skills_dir=project_dir)
+        manager = SkillManager(
+            project_skills_dir=project_dir,
+            global_skills_dir=tmp_path / "no-global",
+        )
         matches = manager.find_matching("全く関係ない指示xyz")
 
         assert matches == []

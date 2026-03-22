@@ -47,6 +47,8 @@ _DEFAULT_EXCLUDE_PATTERNS: list[str] = [
     "build",
     "*.egg-info",
     ".DS_Store",
+    # myagent設定ディレクトリ（スキル・プラグイン等の内部ファイルはプロジェクト索引から除外）
+    ".myagent",
     # 機密ファイル（ファイル名のみであっても露出しないように除外）
     ".env",
     ".env.*",
@@ -262,6 +264,7 @@ class ContextManager:
         self._compress_threshold = compress_threshold
         self._max_output_lines = max_output_lines
         self._project_index: str | None = None
+        self._working_directory: str = ""
         self._inception_messages: list[str] = []
 
     def count_tokens(self, text: str) -> int:
@@ -574,6 +577,7 @@ class ContextManager:
         tree_lines = _build_tree_lines(root, root, patterns, file_count=file_count)
 
         self._project_index = root.name + "/\n" + "\n".join(tree_lines)
+        self._working_directory = str(root)
         logger.info(
             "プロジェクトインデックス構築完了: %s (%d エントリ)",
             root,
@@ -588,3 +592,12 @@ class ContextManager:
             ファイルツリー文字列。未構築の場合は None。
         """
         return self._project_index
+
+    @property
+    def working_directory(self) -> str:
+        """作業ディレクトリの絶対パス.
+
+        Returns:
+            作業ディレクトリの絶対パス文字列。未設定の場合は空文字列。
+        """
+        return self._working_directory

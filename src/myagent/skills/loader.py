@@ -23,6 +23,7 @@ _MAX_DESC_LEN = 1024
 def parse_skill_md(
     skill_md_path: Path,
     scope: Literal["project", "global"],
+    require_dir_match: bool = True,
 ) -> SkillMetadata | None:
     """SKILL.md をパースして SkillMetadata を返す.
 
@@ -31,6 +32,8 @@ def parse_skill_md(
     Args:
         skill_md_path: SKILL.md ファイルのパス。
         scope: スキルのスコープ（"project" or "global"）。
+        require_dir_match: True の場合、name とディレクトリ名の一致を検証する。
+            インストール前の一時ディレクトリからパースする場合は False を指定。
 
     Returns:
         バリデーション済みの SkillMetadata。エラー時は None。
@@ -49,7 +52,9 @@ def parse_skill_md(
     if frontmatter is None:
         return None
 
-    meta = _validate_frontmatter(frontmatter, skill_dir, scope, skill_md_path)
+    meta = _validate_frontmatter(
+        frontmatter, skill_dir, scope, skill_md_path, require_dir_match
+    )
     return meta
 
 
@@ -185,6 +190,7 @@ def _validate_frontmatter(
     skill_dir: Path,
     scope: Literal["project", "global"],
     skill_md_path: Path,
+    require_dir_match: bool = True,
 ) -> SkillMetadata | None:
     """フロントマターのバリデーションを行い SkillMetadata を返す."""
     # 必須フィールド
@@ -212,16 +218,17 @@ def _validate_frontmatter(
     if name_errors:
         return None
 
-    # name とディレクトリ名の一致確認
-    dir_name = skill_dir.name
-    if name != dir_name:
-        logger.warning(
-            "SKILL.md の 'name' (%r) がディレクトリ名 (%r) と一致しません: %s",
-            name,
-            dir_name,
-            skill_md_path,
-        )
-        return None
+    # name とディレクトリ名の一致確認（インストール前は不要なためスキップ可能）
+    if require_dir_match:
+        dir_name = skill_dir.name
+        if name != dir_name:
+            logger.warning(
+                "SKILL.md の 'name' (%r) がディレクトリ名 (%r) と一致しません: %s",
+                name,
+                dir_name,
+                skill_md_path,
+            )
+            return None
 
     # description の長さチェック
     if len(description) > _MAX_DESC_LEN:

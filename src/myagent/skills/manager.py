@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 from typing import Literal
 
@@ -167,8 +168,11 @@ def _match_score(instruction_lower: str, description_lower: str) -> int:
     score = 0
 
     # スペース区切りの各単語マッチング（英語向け）
+    # \b を使った単語境界マッチング（"or"/"to" が "skill-creator" の部分文字列にマッチしないようにする）
     words = [w for w in description_lower.split() if len(w) >= 2]
-    score += sum(1 for word in words if word in instruction_lower)
+    score += sum(
+        1 for word in words if re.search(r"\b" + re.escape(word) + r"\b", instruction_lower)
+    )
 
     # description の先頭 N 文字の部分一致（日本語向け）
     partial_len = 6

@@ -480,8 +480,8 @@ class TestAgentRunnerの確認フロー:
 
         with patch("myagent.agent.graph.ToolNode") as mock_tn_cls:
             mock_tn = MagicMock()
-            # ToolNode.invoke は呼ばれないはず（全て拒否）
-            mock_tn.invoke = MagicMock(return_value={"messages": []})
+            # ToolNode.ainvoke は呼ばれないはず（全て拒否）
+            mock_tn.ainvoke = AsyncMock(return_value={"messages": []})
             mock_tn_cls.return_value = mock_tn
 
             runner = AgentRunner(
@@ -497,8 +497,8 @@ class TestAgentRunnerの確認フロー:
         deny_callback.assert_called_once_with(
             "write_file", {"file_path": "out.txt", "content": "hello"}
         )
-        # ToolNode.invoke は呼ばれなかった（全 tool_call が拒否）
-        mock_tn.invoke.assert_not_called()
+        # ToolNode.ainvoke は呼ばれなかった（全 tool_call が拒否）
+        mock_tn.ainvoke.assert_not_called()
         # 最終回答が返る
         assert result == "了解しました"
 
@@ -533,7 +533,7 @@ class TestAgentRunnerの確認フロー:
             mock_tn = MagicMock()
             from langchain_core.messages import ToolMessage
 
-            mock_tn.invoke = MagicMock(
+            mock_tn.ainvoke = AsyncMock(
                 return_value={
                     "messages": [
                         ToolMessage(
@@ -553,8 +553,8 @@ class TestAgentRunnerの確認フロー:
             )
             result = await runner.run("書いて")
 
-        # confirm_callback=None なので自動承認 → ToolNode.invoke が呼ばれた
-        mock_tn.invoke.assert_called_once()
+        # confirm_callback=None なので自動承認 → ToolNode.ainvoke が呼ばれた
+        mock_tn.ainvoke.assert_called_once()
         assert result == "完了"
 
 

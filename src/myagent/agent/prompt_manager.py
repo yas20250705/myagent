@@ -64,6 +64,7 @@ class PromptManager:
         self,
         task_type: TaskType = "general",
         project_index: str | None = None,
+        working_directory: str = "",
     ) -> str:
         """タスク種別に応じたシステムプロンプトを構築する.
 
@@ -73,6 +74,7 @@ class PromptManager:
         Args:
             task_type: タスク種別。
             project_index: プロジェクトファイルツリー文字列。
+            working_directory: 作業ディレクトリの絶対パス。
 
         Returns:
             構築されたシステムプロンプト。
@@ -83,6 +85,16 @@ class PromptManager:
             base = "あなたはAIアシスタントです。ユーザーの指示に従ってください。"
 
         parts = [base]
+
+        # 作業ディレクトリをコンテキストとして追加
+        if working_directory:
+            parts.append(
+                f"## 作業ディレクトリ\n\n"
+                f"現在の作業ディレクトリは `{working_directory}` です。\n"
+                f"ファイルパスは必ずこのディレクトリからの**相対パス**で指定してください。\n"
+                f"例: `subdir/file.txt`（`{working_directory}/subdir/file.txt` や "
+                f"作業ディレクトリ名を含むパスは使わないこと）"
+            )
 
         # タスク種別固有のテンプレートを追加
         template_name = _TASK_TEMPLATES.get(task_type)

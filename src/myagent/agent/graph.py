@@ -195,7 +195,7 @@ def build_agent_graph(
 
     tool_node = ToolNode(tools)
 
-    def tool_node_wrapper(state: AgentState) -> dict[str, Any]:
+    async def tool_node_wrapper(state: AgentState) -> dict[str, Any]:
         """ツールノードのラッパー。バリデーション・確認フローを経てツールを実行する。"""
         messages = state.get("messages", [])
         last_message = messages[-1] if messages else None
@@ -256,7 +256,7 @@ def build_agent_graph(
                 update={"tool_calls": approved_calls}
             )
             modified_state = {**state, "messages": messages[:-1] + [modified_last]}
-            result_state = tool_node.invoke(modified_state)
+            result_state = await tool_node.ainvoke(modified_state)
             new_messages: list[BaseMessage] = result_state.get("messages", [])
 
             # メトリクス記録
@@ -377,8 +377,14 @@ class AgentRunner:
             if self._context_manager is not None
             else None
         )
+        working_directory = (
+            self._context_manager.working_directory
+            if self._context_manager is not None
+            else ""
+        )
         system_content = self._prompt_manager.build_prompt(
             project_index=project_index,
+            working_directory=working_directory,
         )
         return [
             SystemMessage(content=system_content),

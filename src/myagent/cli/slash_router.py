@@ -289,6 +289,13 @@ class SlashCommandRouter:
         from myagent.plugins.loader import validate_plugin_dir
 
         plugin_root = Path(path)
+        # パスが存在しない場合はプラグイン名としてキャッシュディレクトリから解決する
+        if not plugin_root.exists():
+            cache_dir = self._get_plugin_cache_dir()
+            candidate = cache_dir / path
+            if candidate.exists():
+                plugin_root = candidate
+
         errors = validate_plugin_dir(plugin_root)
         if not errors:
             print_success(f"バリデーション成功: {plugin_root}")
@@ -323,15 +330,17 @@ class SlashCommandRouter:
             self._skill_validate(args[0])
         elif sub == "install":
             if not args:
-                print_error("使用方法: /skill install <git-url-or-path>")
+                print_error("使用方法: /skill install <git-url-or-path> [--all] [--local]")
                 return
-            is_global = "global" in flags
-            self._skill_install(args[0], is_global)
+            # --local 指定がない限りグローバル（~/.myagent/skills）にインストール
+            is_global = "local" not in flags
+            install_all = "all" in flags
+            self._skill_install(args[0], is_global, install_all=install_all)
         elif sub == "uninstall":
             if not args:
                 print_error("使用方法: /skill uninstall <skill-name>")
                 return
-            is_global = "global" in flags
+            is_global = "local" not in flags
             self._skill_uninstall(args[0], is_global)
 
     def _skill_list(self) -> None:
@@ -395,6 +404,15 @@ class SlashCommandRouter:
         from myagent.skills.loader import validate_skill_dir
 
         skill_dir = Path(path)
+        # パスが存在しない場合はスキル名として SkillManager から解決する
+        if not skill_dir.exists():
+            manager = self._build_skill_manager()
+            manager.load_all()
+            meta = manager.get_metadata(path)
+            if meta is not None:
+                skill_dir = meta.skill_dir
+            # 存在しない場合は validate_skill_dir に渡して適切なエラーを出す
+
         errors = validate_skill_dir(skill_dir)
         if not errors:
             print_success(f"バリデーション成功: {skill_dir}")
@@ -403,23 +421,48 @@ class SlashCommandRouter:
             for err in errors:
                 console.print(f"  [red]• {err}[/red]")
 
-    def _skill_install(self, source: str, is_global: bool) -> None:
-        from myagent.skills.installer import install_from_git, install_from_path
+    def _skill_install(
+        self, source: str, is_global: bool, install_all: bool = False
+    ) -> None:
+        from myagent.skills.installer import (
+            install_all_from_git,
+            install_from_git,
+            install_from_path,
+        )
 
         if is_global or not self._config.skill.project_skills_dir:
-            skills_dir = Path.home() / ".myagent" / "skills"
+            global_dir_str = self._config.skill.global_skills_dir
+            skills_dir = (
+                Path(global_dir_str)
+                if global_dir_str
+                else Path.home() / ".myagent" / "skills"
+            )
         else:
             skills_dir = Path(self._config.skill.project_skills_dir)
 
+        # URLかローカルパスかを明示的に判定
+        is_url = source.startswith(("http://", "https://", "git@", "git://", "ssh://"))
         src_path = Path(source)
         try:
-            if src_path.exists():
+            if not is_url and src_path.exists():
                 meta = install_from_path(src_path, skills_dir)
+                print_success(
+                    f"スキルをインストールしました: {meta.name} -> {meta.skill_dir}"
+                )
+            elif install_all:
+                console.print(f"[cyan]クローン中（全スキル）: {source}[/cyan]")
+                metas = install_all_from_git(source, skills_dir)
+                for meta in metas:
+                    print_success(
+                        f"スキルをインストールしました: {meta.name} -> {meta.skill_dir}"
+                    )
+                console.print(f"[green]{len(metas)} 個のスキルをインストールしました[/green]")
             else:
+                console.print(f"[cyan]クローン中: {source}[/cyan]")
                 meta = install_from_git(source, skills_dir)
-            print_success(
-                f"スキルをインストールしました: {meta.name} -> {meta.skill_dir}"
-            )
+                print_success(
+                    f"スキルをインストールしました: {meta.name} -> {meta.skill_dir}"
+                )
         except (ValueError, RuntimeError, OSError) as e:
             print_error(f"インストールに失敗しました: {e}")
 
@@ -434,7 +477,12 @@ class SlashCommandRouter:
             return
 
         if is_global:
-            skills_dir = Path.home() / ".myagent" / "skills"
+            global_dir_str = self._config.skill.global_skills_dir
+            skills_dir = (
+                Path(global_dir_str)
+                if global_dir_str
+                else Path.home() / ".myagent" / "skills"
+            )
         else:
             skills_dir = meta.skill_dir.parent
 
