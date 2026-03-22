@@ -76,3 +76,37 @@ class TestAgentEventの属性:
     def test_dataにカスタムフィールドを設定できる(self) -> None:
         event = AgentEvent(event_type="tool_start", data={"key": "value"})
         assert event.data["key"] == "value"
+
+
+class Test並列実行イベント:
+    """並列実行関連のイベントファクトリメソッドのテスト."""
+
+    def test_parallel_startイベントを生成できる(self) -> None:
+        event = AgentEvent.parallel_start(3, ["タスク1", "タスク2", "タスク3"])
+        assert event.event_type == "parallel_start"
+        assert event.data["total_workers"] == 3
+        assert len(event.data["task_descriptions"]) == 3
+
+    def test_worker_startイベントを生成できる(self) -> None:
+        event = AgentEvent.worker_start("worker-1", "ファイル修正")
+        assert event.event_type == "worker_start"
+        assert event.data["worker_id"] == "worker-1"
+        assert event.data["task_description"] == "ファイル修正"
+
+    def test_worker_end成功イベントを生成できる(self) -> None:
+        event = AgentEvent.worker_end("worker-1", "ファイル修正", True, "完了")
+        assert event.event_type == "worker_end"
+        assert event.data["is_success"] is True
+        assert event.data["result"] == "完了"
+
+    def test_worker_end失敗イベントを生成できる(self) -> None:
+        event = AgentEvent.worker_end("worker-2", "テスト実行", False, "")
+        assert event.data["is_success"] is False
+
+    def test_parallel_endイベントを生成できる(self) -> None:
+        event = AgentEvent.parallel_end(3, 2, 1, "要約")
+        assert event.event_type == "parallel_end"
+        assert event.data["total"] == 3
+        assert event.data["succeeded"] == 2
+        assert event.data["failed"] == 1
+        assert event.data["summary"] == "要約"

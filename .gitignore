@@ -57,6 +57,9 @@ htmlcov/
 .steering/*
 !.steering/.gitkeep
 
+# Project-local myagent config (user-specific settings, custom commands, skills)
+.myagent/
+
 # Secrets / credentials / private keys
 *.pem
 *.key

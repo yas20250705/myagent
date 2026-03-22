@@ -6,12 +6,20 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
 
 from myagent.infra.context import (
     ContextManager,
     _count_tokens,
     _load_gitignore_patterns,
+    get_message_priority,
+    set_message_priority,
 )
 
 
@@ -350,3 +358,218 @@ class Testload_gitignore_patterns:
         patterns = _load_gitignore_patterns(tmp_path)
         assert "dist" in patterns
         assert "dist/" not in patterns
+
+
+class Testメッセージ優先度:
+    """set_message_priority / get_message_priority のテスト."""
+
+    def test_デフォルト優先度はnormal(self) -> None:
+        msg = HumanMessage(content="テスト")
+        assert get_message_priority(msg) == "normal"
+
+    def test_critical優先度を設定できる(self) -> None:
+        msg = HumanMessage(content="重要")
+        updated = set_message_priority(msg, "critical")
+        assert get_message_priority(updated) == "critical"
+
+    def test_low優先度を設定できる(self) -> None:
+        msg = HumanMessage(content="低優先")
+        updated = set_message_priority(msg, "low")
+        assert get_message_priority(updated) == "low"
+
+    def test_元のメッセージは変更されない(self) -> None:
+        msg = HumanMessage(content="テスト")
+        set_message_priority(msg, "critical")
+        assert get_message_priority(msg) == "normal"
+
+
+class TestInceptionMessage:
+    """Inception Message のテスト."""
+
+    def test_inception_messageを登録できる(self) -> None:
+        cm = ContextManager()
+        cm.add_inception_message("重要な制約条件")
+        assert cm.get_inception_messages() == ["重要な制約条件"]
+
+    def test_複数のinception_messageを登録できる(self) -> None:
+        cm = ContextManager()
+        cm.add_inception_message("制約1")
+        cm.add_inception_message("制約2")
+        assert cm.get_inception_messages() == ["制約1", "制約2"]
+
+    def test_初期状態ではinception_messageは空(self) -> None:
+        cm = ContextManager()
+        assert cm.get_inception_messages() == []
+
+    @pytest.mark.asyncio
+    async def test_inception_messageは圧縮で保持される(self) -> None:
+        cm = ContextManager(max_context_tokens=100, compress_threshold=0.1)
+        cm.add_inception_message("絶対に保持する制約")
+
+        mock_model = AsyncMock()
+        mock_model.ainvoke = AsyncMock(
+            return_value=MagicMock(content="要約された内容")
+        )
+
+        messages = [
+            SystemMessage(content="システム"),
+            HumanMessage(content="古いメッセージ1" * 100),
+            AIMessage(content="回答1" * 100),
+            HumanMessage(content="古いメッセージ2" * 100),
+            AIMessage(content="回答2" * 100),
+            HumanMessage(content="最近1"),
+            AIMessage(content="最近2"),
+            HumanMessage(content="最近3"),
+            AIMessage(content="最近4"),
+            HumanMessage(content="最近5"),
+            AIMessage(content="最近6"),
+        ]
+
+        compressed = await cm.compress_messages(messages, mock_model)
+
+        # inception message が含まれていることを確認
+        contents = [
+            m.content for m in compressed if isinstance(m.content, str)
+        ]
+        has_inception = any("絶対に保持する制約" in c for c in contents)
+        assert has_inception
+
+
+class TestCritical優先度の圧縮:
+    """critical 優先度メッセージの圧縮テスト."""
+
+    @pytest.mark.asyncio
+    async def test_criticalメッセージは圧縮で保持される(self) -> None:
+        cm = ContextManager(max_context_tokens=100, compress_threshold=0.1)
+
+        mock_model = AsyncMock()
+        mock_model.ainvoke = AsyncMock(
+            return_value=MagicMock(content="要約")
+        )
+
+        critical_msg = set_message_priority(
+            HumanMessage(content="critical_content_here"), "critical"
+        )
+
+        messages = [
+            SystemMessage(content="システム"),
+            critical_msg,
+            HumanMessage(content="通常メッセージ" * 100),
+            AIMessage(content="回答" * 100),
+            HumanMessage(content="最近1"),
+            AIMessage(content="最近2"),
+            HumanMessage(content="最近3"),
+            AIMessage(content="最近4"),
+            HumanMessage(content="最近5"),
+            AIMessage(content="最近6"),
+        ]
+
+        compressed = await cm.compress_messages(messages, mock_model)
+
+        # critical メッセージが保持されていることを確認
+        contents = [
+            m.content for m in compressed if isinstance(m.content, str)
+        ]
+        has_critical = any("critical_content_here" in c for c in contents)
+        assert has_critical
+
+
+class TestDCP:
+    """Dynamic Context Pruning のテスト."""
+
+    def test_write後のread_file結果が刈り込まれる(self) -> None:
+        cm = ContextManager()
+        messages: list[BaseMessage] = [
+            HumanMessage(content="ファイルを読んで"),
+            ToolMessage(
+                content="ファイルの内容: hello world",
+                tool_call_id="1",
+                name="read_file",
+            ),
+            HumanMessage(content="編集して"),
+            ToolMessage(
+                content="ファイルを編集しました",
+                tool_call_id="2",
+                name="edit_file",
+            ),
+        ]
+
+        result = cm.prune_redundant_tool_outputs(messages)
+
+        # read_file の出力が短縮されている
+        assert "出力省略" in result[1].content
+        # edit_file の出力はそのまま
+        assert "ファイルを編集しました" in result[3].content
+
+    def test_write前のread_file結果は保持される(self) -> None:
+        cm = ContextManager()
+        messages: list[BaseMessage] = [
+            ToolMessage(
+                content="ファイルの内容: hello",
+                tool_call_id="1",
+                name="read_file",
+            ),
+        ]
+
+        result = cm.prune_redundant_tool_outputs(messages)
+
+        # write がないので read_file 結果はそのまま
+        assert "ファイルの内容: hello" in result[0].content
+
+    def test_list_directory重複が刈り込まれる(self) -> None:
+        cm = ContextManager()
+        messages: list[BaseMessage] = [
+            ToolMessage(
+                content="dir1/\nfile1.py",
+                tool_call_id="1",
+                name="list_directory",
+            ),
+            HumanMessage(content="もう一度"),
+            ToolMessage(
+                content="dir1/\nfile1.py\nfile2.py",
+                tool_call_id="2",
+                name="list_directory",
+            ),
+        ]
+
+        result = cm.prune_redundant_tool_outputs(messages)
+
+        # 古い list_directory が短縮され、最新は保持
+        assert "出力省略" in result[0].content
+        assert "file2.py" in result[2].content
+
+    def test_glob_search重複が刈り込まれる(self) -> None:
+        cm = ContextManager()
+        messages: list[BaseMessage] = [
+            ToolMessage(
+                content="src/main.py",
+                tool_call_id="1",
+                name="glob_search",
+            ),
+            ToolMessage(
+                content="src/main.py\nsrc/utils.py",
+                tool_call_id="2",
+                name="glob_search",
+            ),
+        ]
+
+        result = cm.prune_redundant_tool_outputs(messages)
+
+        assert "出力省略" in result[0].content
+        assert "src/utils.py" in result[1].content
+
+    def test_空メッセージリストはそのまま返す(self) -> None:
+        cm = ContextManager()
+        assert cm.prune_redundant_tool_outputs([]) == []
+
+    def test_ToolMessage以外のメッセージは影響を受けない(self) -> None:
+        cm = ContextManager()
+        messages: list[BaseMessage] = [
+            HumanMessage(content="テスト"),
+            AIMessage(content="回答"),
+        ]
+
+        result = cm.prune_redundant_tool_outputs(messages)
+
+        assert result[0].content == "テスト"
+        assert result[1].content == "回答"

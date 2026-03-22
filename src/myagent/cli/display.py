@@ -80,12 +80,16 @@ def print_tool_end(tool_name: str, result: str, is_success: bool = True) -> None
 
 def print_error(message: str) -> None:
     """エラーメッセージを表示する."""
-    console.print(f"[bold red]エラー:[/bold red] {message}")
+    from rich.markup import escape
+
+    console.print(f"[bold red]エラー:[/bold red] {escape(message)}")
 
 
 def print_success(message: str) -> None:
     """成功メッセージを表示する."""
-    console.print(f"[bold green]{message}[/bold green]")
+    from rich.markup import escape
+
+    console.print(f"[bold green]{escape(message)}[/bold green]")
 
 
 def print_token_usage(

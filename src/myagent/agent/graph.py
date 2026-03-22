@@ -15,13 +15,17 @@ from langchain_core.messages import (
     SystemMessage,
     ToolMessage,
 )
+from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, StateGraph
 from langgraph.prebuilt import ToolNode
 
 from myagent.agent.critic import Critic
 from myagent.agent.events import AgentEvent
 from myagent.agent.executor import Executor
+from myagent.agent.metrics import SessionMetrics
+from myagent.agent.prompt_manager import PromptManager
 from myagent.agent.state import AgentState
+from myagent.agent.tool_validator import ToolValidator
 from myagent.infra.context import ContextManager
 from myagent.infra.errors import MyAgentError
 
@@ -31,8 +35,38 @@ if TYPE_CHECKING:
     from langchain_core.language_models import BaseChatModel
     from langchain_core.tools import BaseTool
 
+    from myagent.tools.registry import ToolRegistry
+
 _MAX_RECENT_MESSAGES = 20
 _MAX_CONTENT_CHARS = 8000
+
+
+def _remove_orphaned_tool_messages(messages: list[BaseMessage]) -> list[BaseMessage]:
+    """対応するtool_callsを持たないToolMessageを除去する.
+
+    メッセージ切り詰め後にAIMessage(tool_calls)が失われ、
+    ToolMessageだけが残る「孤立ToolMessage」を除去する。
+    OpenAI APIはtool_callsのないToolMessageをエラーとするため必須。
+    """
+    available_ids: set[str] = set()
+    result: list[BaseMessage] = []
+
+    for msg in messages:
+        if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
+            for tc in msg.tool_calls:
+                tc_id = tc.get("id")
+                if tc_id is not None:
+                    available_ids.add(tc_id)
+            result.append(msg)
+        elif isinstance(msg, ToolMessage):
+            if msg.tool_call_id in available_ids:
+                available_ids.discard(msg.tool_call_id)
+                result.append(msg)
+            # else: 孤立ToolMessage → スキップ
+        else:
+            result.append(msg)
+
+    return result
 
 
 def _truncate_messages(messages: list[BaseMessage]) -> list[BaseMessage]:
@@ -41,6 +75,7 @@ def _truncate_messages(messages: list[BaseMessage]) -> list[BaseMessage]:
     SystemMessage と最初の HumanMessage は常に保持し、
     それ以降は直近 _MAX_RECENT_MESSAGES 件に絞る。
     各メッセージのコンテンツが長すぎる場合も切り詰める。
+    切り詰め後に孤立した ToolMessage を除去してAPIエラーを防ぐ。
     """
 
     def _trim_content(msg: BaseMessage) -> BaseMessage:
@@ -66,14 +101,14 @@ def _truncate_messages(messages: list[BaseMessage]) -> list[BaseMessage]:
     if len(rest) > _MAX_RECENT_MESSAGES:
         rest = rest[-_MAX_RECENT_MESSAGES:]
 
+    # 切り詰めにより孤立したToolMessageを除去
+    rest = _remove_orphaned_tool_messages(rest)
+
     return fixed + rest
 
 
-SYSTEM_PROMPT = """あなたは高度なAIコーディングアシスタントです。
-ユーザーの指示に従い、利用可能なツールを使って作業を完了してください。
-
-ツールを使う必要がある場合はツールを呼び出し、結果を確認してから次のステップに進んでください。
-すべての作業が完了したら、最終的な回答をテキストで返してください。"""
+# 後方互換性のために残す（テスト等で直接参照されている場合）
+SYSTEM_PROMPT = PromptManager().build_prompt()
 
 
 def build_agent_graph(
@@ -82,6 +117,8 @@ def build_agent_graph(
     max_loops: int = 20,
     executor: Executor | None = None,
     confirm_callback: Callable[[str, dict[str, Any]], bool] | None = None,
+    tool_validator: ToolValidator | None = None,
+    metrics: SessionMetrics | None = None,
 ) -> StateGraph[AgentState]:
     """ReActエージェントのLangGraphステートマシンを構築する.
 
@@ -91,6 +128,8 @@ def build_agent_graph(
         max_loops: 最大ループ回数。
         executor: ツール確認フローを管理するExecutor。Noneの場合は確認なし。
         confirm_callback: ユーザー確認を求めるコールバック。承認でTrue、拒否でFalse。
+        tool_validator: ツールパラメータバリデーター。Noneの場合はバリデーションなし。
+        metrics: セッションメトリクス。Noneの場合はメトリクス収集なし。
 
     Returns:
         コンパイル済みのStateGraph。
@@ -121,7 +160,19 @@ def build_agent_graph(
                 "is_completed": True,
             }
 
+        # エラー繰り返し検知
+        error_detected, error_msg = critic.detect_error_repetition(messages)
+        if error_detected:
+            return {
+                "messages": messages + [AIMessage(content=error_msg)],
+                "loop_count": loop_count,
+                "is_completed": True,
+            }
+
         response = await model_with_tools.ainvoke(_truncate_messages(messages))
+
+        if metrics is not None:
+            metrics.record_step()
 
         return {
             "messages": messages + [response],
@@ -145,18 +196,35 @@ def build_agent_graph(
     tool_node = ToolNode(tools)
 
     def tool_node_wrapper(state: AgentState) -> dict[str, Any]:
-        """ツールノードのラッパー。確認フローを経てツールを実行する。"""
+        """ツールノードのラッパー。バリデーション・確認フローを経てツールを実行する。"""
         messages = state.get("messages", [])
         last_message = messages[-1] if messages else None
         tool_calls = getattr(last_message, "tool_calls", []) if last_message else []
 
         denied_messages: list[ToolMessage] = []
+        validation_error_messages: list[ToolMessage] = []
         approved_calls: list[dict[str, Any]] = []
 
         for tc in tool_calls:
             tool_name: str = tc["name"]
             tool_args: dict[str, Any] = tc["args"]
             tool_call_id: str = tc["id"]
+
+            # パラメータバリデーション
+            if tool_validator is not None:
+                result = tool_validator.validate(tool_name, tool_args)
+                if not result.is_valid:
+                    validation_error_messages.append(
+                        ToolMessage(
+                            content=f"パラメータエラー: {result.error_message}\n"
+                            "正しいパラメータで再度呼び出してください。",
+                            tool_call_id=tool_call_id,
+                            name=tool_name,
+                        )
+                    )
+                    if metrics is not None:
+                        metrics.record_tool_call(tool_name, is_success=False)
+                    continue
 
             needs_confirm = executor is not None and executor.should_confirm(
                 tool_name, tool_args
@@ -176,17 +244,42 @@ def build_agent_graph(
 
             approved_calls.append(tc)
 
+        # ユーザーが拒否した場合は即座にエージェントを停止する
+        if denied_messages:
+            return {
+                "messages": messages + denied_messages,
+                "is_completed": True,
+            }
+
         if approved_calls and last_message is not None:
             modified_last = last_message.model_copy(
                 update={"tool_calls": approved_calls}
             )
             modified_state = {**state, "messages": messages[:-1] + [modified_last]}
-            result = tool_node.invoke(modified_state)
-            new_messages: list[BaseMessage] = result.get("messages", [])
+            result_state = tool_node.invoke(modified_state)
+            new_messages: list[BaseMessage] = result_state.get("messages", [])
+
+            # メトリクス記録
+            if metrics is not None:
+                for msg in new_messages:
+                    if isinstance(msg, ToolMessage):
+                        content = msg.content if isinstance(msg.content, str) else ""
+                        is_error = any(
+                            kw in content
+                            for kw in ("Error", "エラー", "失敗", "error", "Exception")
+                        )
+                        tool_name_for_metric = getattr(msg, "name", "") or ""
+                        metrics.record_tool_call(
+                            tool_name_for_metric, is_success=not is_error
+                        )
         else:
             new_messages = []
 
-        return {"messages": messages + denied_messages + new_messages}
+        return {
+            "messages": messages
+            + validation_error_messages
+            + new_messages
+        }
 
     graph = StateGraph(AgentState)
     graph.add_node("agent", agent_node)
@@ -214,15 +307,57 @@ class AgentRunner:
         executor: Executor | None = None,
         confirm_callback: Callable[[str, dict[str, Any]], bool] | None = None,
         context_manager: ContextManager | None = None,
+        prompt_manager: PromptManager | None = None,
+        tool_registry: ToolRegistry | None = None,
+        max_parallel_workers: int = 3,
+        langsmith_project: str = "",
     ) -> None:
         self._model = model
+        self._langsmith_project = langsmith_project
+        self._tools = tools
+        self._max_loops = max_loops
+        self._executor = executor
+        self._confirm_callback = confirm_callback
         self._context_manager = context_manager
+        self._prompt_manager = prompt_manager or PromptManager()
+        self._metrics = SessionMetrics()
+        self._max_parallel_workers = max_parallel_workers
+
+        # ToolValidator はレジストリがあれば作成
+        tool_validator: ToolValidator | None = None
+        if tool_registry is not None:
+            tool_validator = ToolValidator(tool_registry)
+
         self._graph = build_agent_graph(
-            model, tools, max_loops, executor, confirm_callback
+            model,
+            tools,
+            max_loops,
+            executor,
+            confirm_callback,
+            tool_validator=tool_validator,
+            metrics=self._metrics,
         )
         self._compiled = self._graph.compile()
         # ターン間で引き継ぐメッセージ履歴（SystemMessage + 会話全体）
         self._history: list[BaseMessage] = []
+
+        # Orchestrator と Planner（遅延初期化、循環インポート回避のためAny型）
+        self._planner: Any = None
+        self._orchestrator: Any = None
+        self._tool_registry = tool_registry
+
+    @property
+    def metrics(self) -> SessionMetrics:
+        """セッションメトリクスを返す."""
+        return self._metrics
+
+    def _make_runnable_config(self, run_name: str = "agent-run") -> RunnableConfig:
+        """LangSmith用 RunnableConfig を生成する."""
+        tags = ["myagent"]
+        metadata: dict[str, Any] = {"max_loops": self._max_loops}
+        if self._langsmith_project:
+            metadata["project"] = self._langsmith_project
+        return RunnableConfig(run_name=run_name, tags=tags, metadata=metadata)
 
     def clear_history(self) -> None:
         """会話履歴をリセットする."""
@@ -231,21 +366,20 @@ class AgentRunner:
     def _build_initial_messages(self, instruction: str) -> list[BaseMessage]:
         """履歴に新しいユーザー指示を加えた初期メッセージリストを生成する.
 
-        初回ターンの場合、project_index が設定されていれば SystemMessage に注入する。
+        初回ターンの場合、PromptManager でシステムプロンプトを構築する。
         """
         if self._history:
             return list(self._history) + [HumanMessage(content=instruction)]
-        # 初回ターン: project_index があれば SystemMessage に注入
-        system_content = SYSTEM_PROMPT
-        if (
-            self._context_manager is not None
-            and self._context_manager.project_index is not None
-        ):
-            system_content = (
-                SYSTEM_PROMPT
-                + "\n\n## プロジェクト構造\n\n"
-                + self._context_manager.project_index
-            )
+
+        # 初回ターン: PromptManager でプロンプト構築
+        project_index = (
+            self._context_manager.project_index
+            if self._context_manager is not None
+            else None
+        )
+        system_content = self._prompt_manager.build_prompt(
+            project_index=project_index,
+        )
         return [
             SystemMessage(content=system_content),
             HumanMessage(content=instruction),
@@ -260,7 +394,7 @@ class AgentRunner:
         """必要に応じて会話履歴をコンテキスト圧縮する.
 
         ContextManager が設定されており、履歴が圧縮閾値を超えている場合に
-        LLM を使って古い会話を要約・圧縮する。
+        DCP を実行してから LLM を使って古い会話を要約・圧縮する。
         """
         if (
             self._context_manager is None
@@ -268,6 +402,11 @@ class AgentRunner:
             or not self._context_manager.needs_compression(self._history)
         ):
             return
+
+        # DCP: 圧縮前に冗長なツール出力を刈り込む
+        self._history = self._context_manager.prune_redundant_tool_outputs(
+            self._history
+        )
 
         compressed = await self._context_manager.compress_messages(
             self._history, self._model
@@ -296,7 +435,10 @@ class AgentRunner:
         }
 
         try:
-            result = await self._compiled.ainvoke(initial_state)  # type: ignore[arg-type]
+            result = await self._compiled.ainvoke(
+                initial_state,  # type: ignore[arg-type]
+                config=self._make_runnable_config("agent-run"),
+            )
         except Exception as e:
             msg = f"エージェント実行中にエラーが発生しました: {e}"
             raise MyAgentError(msg) from e
@@ -319,6 +461,93 @@ class AgentRunner:
                     ]
                     return "".join(texts) or "(回答なし)"
         return "(回答なし)"
+
+    def _get_planner(self) -> Any:
+        """Planner を遅延初期化して返す."""
+        if self._planner is None:
+            from myagent.agent.planner import Planner
+
+            self._planner = Planner(self._model)
+        return self._planner
+
+    def _get_orchestrator(self) -> Any:
+        """Orchestrator を遅延初期化して返す."""
+        if self._orchestrator is None:
+            from myagent.agent.orchestrator import Orchestrator
+
+            self._orchestrator = Orchestrator(
+                model=self._model,
+                tools=self._tools,
+                max_workers=self._max_parallel_workers,
+                max_loops=self._max_loops,
+                executor=self._executor,
+                confirm_callback=self._confirm_callback,
+                context_manager=self._context_manager,
+                prompt_manager=self._prompt_manager,
+                tool_registry=self._tool_registry,
+            )
+        return self._orchestrator
+
+    async def run_parallel(self, instruction: str) -> str:
+        """Planner + Orchestrator 経由で並列実行する.
+
+        サブタスクを依存関係分析し、独立したタスクを並列実行する。
+
+        Args:
+            instruction: ユーザーからの指示テキスト。
+
+        Returns:
+            全ワーカーの実行結果の要約。
+
+        Raises:
+            MyAgentError: 実行中にエラーが発生した場合。
+        """
+        from myagent.agent.orchestrator import _build_summary
+
+        planner = self._get_planner()
+        orchestrator = self._get_orchestrator()
+
+        try:
+            tasks = await planner.plan_with_dependencies(instruction)
+        except Exception as e:
+            msg = f"タスク分解に失敗しました: {e}"
+            raise MyAgentError(msg) from e
+
+        try:
+            results = await orchestrator.execute(tasks, metrics=self._metrics)
+        except Exception as e:
+            msg = f"並列実行中にエラーが発生しました: {e}"
+            raise MyAgentError(msg) from e
+
+        return _build_summary(results)
+
+    async def run_parallel_with_events(
+        self, instruction: str
+    ) -> AsyncIterator[AgentEvent]:
+        """Planner + Orchestrator 経由でイベント付き並列実行する.
+
+        Args:
+            instruction: ユーザーからの指示テキスト。
+
+        Yields:
+            エージェントイベント。
+        """
+        planner = self._get_planner()
+        orchestrator = self._get_orchestrator()
+
+        try:
+            tasks = await planner.plan_with_dependencies(instruction)
+        except Exception as e:
+            yield AgentEvent.agent_error(f"タスク分解に失敗しました: {e}")
+            return
+
+        try:
+            async for event in orchestrator.execute_with_events(
+                tasks, metrics=self._metrics
+            ):
+                yield event
+        except Exception as e:
+            yield AgentEvent.agent_error(f"並列実行中にエラーが発生しました: {e}")
 
     async def run_with_events(self, instruction: str) -> AsyncIterator[AgentEvent]:
         """指示を実行し、イベントをストリーミングで返す.
@@ -345,7 +574,9 @@ class AgentRunner:
 
         try:
             async for event in self._compiled.astream_events(
-                initial_state, version="v2"
+                initial_state,
+                version="v2",
+                config=self._make_runnable_config("agent-stream"),
             ):
                 kind = event.get("event", "")
 

@@ -27,6 +27,9 @@ class SubTask:
     description: str
     is_completed: bool = False
     result: str = ""
+    task_id: str = ""
+    depends_on: list[str] = field(default_factory=list)
+    target_files: list[str] = field(default_factory=list)
 
 
 @dataclass

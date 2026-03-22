@@ -1,6 +1,8 @@
 """コンテキスト管理モジュール.
 
 会話履歴のトークン追跡・圧縮・プロジェクトインデックス管理を提供する。
+優先度ベースの圧縮、固定コンテキスト（Inception Message）、
+Dynamic Context Pruning（DCP）をサポートする。
 """
 
 from __future__ import annotations
@@ -8,14 +10,21 @@ from __future__ import annotations
 import fnmatch
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
-from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import (
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
 
 if TYPE_CHECKING:
     from langchain_core.language_models import BaseChatModel
 
 logger = logging.getLogger(__name__)
+
+MessagePriority = Literal["critical", "normal", "low"]
 
 # プロジェクトインデックスのデフォルト制限
 _MAX_INDEX_FILES = 200
@@ -52,6 +61,46 @@ _DEFAULT_EXCLUDE_PATTERNS: list[str] = [
 
 # 圧縮時に保持する直近メッセージ数
 _KEEP_RECENT_MESSAGES = 6
+
+# DCP対象のツール名
+_DCP_READ_TOOLS = {"read_file"}
+_DCP_WRITE_TOOLS = {"edit_file", "write_file"}
+_DCP_LIST_TOOLS = {"list_directory", "glob_search"}
+
+# DCP短縮時のサマリーテンプレート
+_DCP_PRUNED_TEMPLATE = "(出力省略: {tool_name} の結果は後続の操作で上書きされました)"
+_DCP_DUPLICATE_TEMPLATE = "(出力省略: {tool_name} の最新の結果が後方に存在します)"
+
+
+def set_message_priority(
+    msg: BaseMessage, priority: MessagePriority
+) -> BaseMessage:
+    """メッセージに優先度を設定する.
+
+    BaseMessage の additional_kwargs に priority キーを追加する。
+
+    Args:
+        msg: 対象メッセージ。
+        priority: 設定する優先度。
+
+    Returns:
+        優先度が設定されたメッセージ（新しいコピー）。
+    """
+    new_kwargs = {**msg.additional_kwargs, "priority": priority}
+    return msg.model_copy(update={"additional_kwargs": new_kwargs})
+
+
+def get_message_priority(msg: BaseMessage) -> MessagePriority:
+    """メッセージの優先度を取得する.
+
+    Args:
+        msg: 対象メッセージ。
+
+    Returns:
+        メッセージの優先度。未設定の場合は "normal"。
+    """
+    raw = msg.additional_kwargs.get("priority", "normal")
+    return raw  # type: ignore[no-any-return]
 
 
 def _count_tokens(text: str) -> int:
@@ -213,6 +262,7 @@ class ContextManager:
         self._compress_threshold = compress_threshold
         self._max_output_lines = max_output_lines
         self._project_index: str | None = None
+        self._inception_messages: list[str] = []
 
     def count_tokens(self, text: str) -> int:
         """テキストのトークン数を推定する.
@@ -270,6 +320,112 @@ class ContextManager:
             return 0.0
         return self.messages_token_count(messages) / self._max_context_tokens
 
+    def add_inception_message(self, content: str) -> None:
+        """固定コンテキスト（Inception Message）を登録する.
+
+        Inception Message は圧縮時に要約対象から除外され、常に保持される。
+
+        Args:
+            content: 固定コンテキストの内容。
+        """
+        self._inception_messages.append(content)
+
+    def get_inception_messages(self) -> list[str]:
+        """登録済みの固定コンテキストを返す.
+
+        Returns:
+            固定コンテキストのリスト。
+        """
+        return list(self._inception_messages)
+
+    def prune_redundant_tool_outputs(
+        self, messages: list[BaseMessage]
+    ) -> list[BaseMessage]:
+        """冗長なツール出力を動的に刈り込む（DCP）.
+
+        以下のルールで不要な中間出力を短縮する:
+        - read_file の結果で、そのファイルが後に edit_file/write_file で
+          上書きされた場合、古い read_file 結果を短縮
+        - list_directory/glob_search の結果が複数回ある場合、
+          最新以外を短縮
+
+        Args:
+            messages: 刈り込み対象のメッセージリスト。
+
+        Returns:
+            刈り込み後のメッセージリスト。
+        """
+        if not messages:
+            return messages
+
+        # ToolMessage のインデックスとツール情報を収集
+        tool_infos: list[tuple[int, str, str]] = []  # (index, tool_name, file_path)
+        for i, msg in enumerate(messages):
+            if isinstance(msg, ToolMessage):
+                tool_name = getattr(msg, "name", "") or ""
+                # ToolMessage の tool_call_id から推定できないため
+                # name 属性を使用する
+                file_path = ""
+                if tool_name in (_DCP_READ_TOOLS | _DCP_WRITE_TOOLS):
+                    # AIMessage の tool_calls から引数を取得は困難なため
+                    # ToolMessage の content からファイルパスを推定しない
+                    # 代わりにツール名のみで判断する
+                    file_path = tool_name  # グルーピングキーとして使用
+                tool_infos.append((i, tool_name, file_path))
+
+        if not tool_infos:
+            return messages
+
+        # 上書きされた read_file の検出
+        # write/edit ツールが実行された場合、それ以前の read_file 結果を短縮
+        write_indices: set[int] = set()
+        for i, tool_name, _ in tool_infos:
+            if tool_name in _DCP_WRITE_TOOLS:
+                write_indices.add(i)
+
+        prune_indices: set[int] = set()
+
+        if write_indices:
+            last_write_idx = max(write_indices)
+            for i, tool_name, _ in tool_infos:
+                if tool_name in _DCP_READ_TOOLS and i < last_write_idx:
+                    prune_indices.add(i)
+
+        # list_directory/glob_search の重複検出（最新以外を短縮）
+        list_tool_indices: dict[str, list[int]] = {}
+        for i, tool_name, _ in tool_infos:
+            if tool_name in _DCP_LIST_TOOLS:
+                list_tool_indices.setdefault(tool_name, []).append(i)
+
+        for _tool_name, indices in list_tool_indices.items():
+            if len(indices) > 1:
+                # 最新以外を刈り込み対象にする
+                for idx in indices[:-1]:
+                    prune_indices.add(idx)
+
+        if not prune_indices:
+            return messages
+
+        # メッセージリストを再構築
+        result: list[BaseMessage] = []
+        for i, msg in enumerate(messages):
+            if i in prune_indices:
+                tool_name = getattr(msg, "name", "") or "tool"
+                if tool_name in _DCP_READ_TOOLS:
+                    template = _DCP_PRUNED_TEMPLATE
+                else:
+                    template = _DCP_DUPLICATE_TEMPLATE
+                pruned = msg.model_copy(
+                    update={"content": template.format(tool_name=tool_name)}
+                )
+                result.append(pruned)
+            else:
+                result.append(msg)
+
+        pruned_count = len(prune_indices)
+        logger.info("DCP: %d件のToolMessage出力を短縮しました", pruned_count)
+        return result
+
     async def compress_messages(
         self,
         messages: list[BaseMessage],
@@ -280,6 +436,8 @@ class ContextManager:
         SystemMessage を先頭に保持し、古いメッセージを要約した
         HumanMessage に置き換える。
         直近 _KEEP_RECENT_MESSAGES 件のメッセージはそのまま保持する。
+        priority が "critical" のメッセージと Inception Message は
+        要約対象から除外して保持する。
 
         Args:
             messages: 圧縮対象のメッセージリスト。
@@ -308,12 +466,39 @@ class ContextManager:
         to_summarize = other_msgs[:-_KEEP_RECENT_MESSAGES]
         recent = other_msgs[-_KEEP_RECENT_MESSAGES:]
 
+        # critical メッセージを要約対象から除外して保持
+        critical_msgs: list[BaseMessage] = []
+        summarize_targets: list[BaseMessage] = []
+        for msg in to_summarize:
+            if get_message_priority(msg) == "critical":
+                critical_msgs.append(msg)
+            else:
+                summarize_targets.append(msg)
+
+        # Inception Message を HumanMessage として保持
+        inception_msgs: list[BaseMessage] = []
+        for content in self._inception_messages:
+            inception_msgs.append(
+                HumanMessage(content=f"[固定コンテキスト]\n{content}")
+            )
+
         # 要約プロンプトを構築
         conversation_text = "\n".join(
             f"[{msg.__class__.__name__}]: {msg.content}"
-            for msg in to_summarize
+            for msg in summarize_targets
             if isinstance(msg.content, str)
         )
+
+        if not conversation_text.strip():
+            # 要約対象が空の場合（全てcriticalだった場合）
+            compressed = (
+                list(system_msgs)
+                + inception_msgs
+                + critical_msgs
+                + list(recent)
+            )
+            return compressed
+
         summary_prompt = (
             "以下の会話履歴を、重要な情報・決定・ファイル変更を漏らさず"
             "簡潔に要約してください。要約のみを返してください。\n\n"
@@ -329,7 +514,13 @@ class ContextManager:
                 summary_content = str(summary_content)
 
             summary_msg = HumanMessage(content=f"[会話履歴の要約]\n{summary_content}")
-            compressed = list(system_msgs) + [summary_msg] + list(recent)
+            compressed = (
+                list(system_msgs)
+                + inception_msgs
+                + critical_msgs
+                + [summary_msg]
+                + list(recent)
+            )
             logger.info(
                 "コンテキスト圧縮完了: %d件 → %d件",
                 len(messages),

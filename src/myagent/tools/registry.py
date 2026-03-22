@@ -21,6 +21,7 @@ from myagent.tools.file_tools import (
 from myagent.tools.path_security import AllowedDirectories
 from myagent.tools.shared_state import WorkingDirectory
 from myagent.tools.shell_tools import RunCommandTool
+from myagent.tools.web_tools import WebFetchTool, WebSearchTool
 
 
 class ToolRegistry:
@@ -60,6 +61,13 @@ def create_default_registry(
     project_root: Path | None = None,
     extra_allowed_dirs: list[Path] | None = None,
     initial_cwd: Path | None = None,
+    web_search_api_key: str = "",
+    web_search_timeout: int = 25,
+    web_search_default_num_results: int = 5,
+    web_fetch_timeout: int = 30,
+    web_fetch_max_size_bytes: int = 5 * 1024 * 1024,
+    web_search_fallback_enabled: bool = True,
+    web_search_backend_names: list[str] | None = None,
 ) -> ToolRegistry:
     """デフォルトのツール一式を登録したレジストリを作成する.
 
@@ -67,6 +75,13 @@ def create_default_registry(
         project_root: プロジェクトルートパス。Noneの場合はカレントディレクトリ。
         extra_allowed_dirs: 追加の許可ディレクトリ。
         initial_cwd: 初期作業ディレクトリ。Noneの場合はproject_rootと同じ。
+        web_search_api_key: Exa AI Web検索APIキー。
+        web_search_timeout: Web検索タイムアウト秒数。
+        web_search_default_num_results: Web検索デフォルト件数。
+        web_fetch_timeout: Webページ取得タイムアウト秒数。
+        web_fetch_max_size_bytes: Webページ取得最大サイズ（バイト）。
+        web_search_fallback_enabled: フォールバック検索の有効/無効。
+        web_search_backend_names: 検索バックエンド名リスト。
 
     Returns:
         全デフォルトツールが登録されたToolRegistry。
@@ -94,6 +109,25 @@ def create_default_registry(
     registry.register(GrepSearchTool(allowed_dirs=allowed, working_dir=wd))
     registry.register(
         RunCommandTool(cwd=start_cwd, allowed_dirs=allowed, working_dir=wd)
+    )
+    backend_names = web_search_backend_names or [
+        "exa",
+        "duckduckgo",
+    ]
+    registry.register(
+        WebSearchTool(
+            api_key=web_search_api_key,
+            timeout_seconds=web_search_timeout,
+            default_num_results=web_search_default_num_results,
+            fallback_enabled=web_search_fallback_enabled,
+            search_backend_names=backend_names,
+        )
+    )
+    registry.register(
+        WebFetchTool(
+            timeout_seconds=web_fetch_timeout,
+            max_size_bytes=web_fetch_max_size_bytes,
+        )
     )
 
     return registry

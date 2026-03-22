@@ -6,8 +6,10 @@ from myagent.infra.errors import (
     ConfigError,
     LLMError,
     MyAgentError,
+    OrchestratorError,
     SecurityError,
     ToolExecutionError,
+    WorkerError,
 )
 
 
@@ -28,6 +30,12 @@ class TestMyAgentErrorの継承関係:
 
     def test_ConfigErrorはMyAgentErrorを継承する(self) -> None:
         assert issubclass(ConfigError, MyAgentError)
+
+    def test_OrchestratorErrorはMyAgentErrorを継承する(self) -> None:
+        assert issubclass(OrchestratorError, MyAgentError)
+
+    def test_WorkerErrorはMyAgentErrorを継承する(self) -> None:
+        assert issubclass(WorkerError, MyAgentError)
 
 
 class TestMyAgentErrorのキャッチ:
@@ -60,3 +68,23 @@ class TestMyAgentErrorのメッセージ:
     def test_空のメッセージでも生成できる(self) -> None:
         error = MyAgentError()
         assert str(error) == ""
+
+
+class TestWorkerErrorの属性:
+    """WorkerError の属性を検証する."""
+
+    def test_worker_idとtask_idが保持される(self) -> None:
+        error = WorkerError("失敗", worker_id="w1", task_id="t1")
+        assert error.worker_id == "w1"
+        assert error.task_id == "t1"
+        assert str(error) == "失敗"
+
+    def test_デフォルト値はunknown(self) -> None:
+        error = WorkerError("エラー")
+        assert error.worker_id == "unknown"
+        assert error.task_id == "unknown"
+
+    def test_cause設定(self) -> None:
+        cause = ValueError("原因")
+        error = WorkerError("失敗", cause=cause)
+        assert error.__cause__ is cause

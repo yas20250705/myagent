@@ -5,10 +5,15 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from myagent.agent.executor import Executor
-from myagent.agent.graph import AgentRunner, _truncate_messages, build_agent_graph
+from myagent.agent.graph import (
+    AgentRunner,
+    _remove_orphaned_tool_messages,
+    _truncate_messages,
+    build_agent_graph,
+)
 from myagent.agent.state import AgentState
 from myagent.infra.context import ContextManager
 from myagent.infra.errors import MyAgentError
@@ -227,6 +232,101 @@ class TestAgentRunnerのrun_with_events:
             events.append(event)
 
         assert events[0].event_type == "agent_error"
+
+
+class Test_remove_orphaned_tool_messages:
+    """_remove_orphaned_tool_messages 関数のテスト."""
+
+    def test_孤立ToolMessageを除去する(self) -> None:
+        """AIMessage(tool_calls)がないToolMessageは除去される."""
+        orphaned = ToolMessage(
+            content="result", tool_call_id="tc-orphan", name="some_tool"
+        )
+        result = _remove_orphaned_tool_messages([orphaned])
+        assert result == []
+
+    def test_対応するAIMessageがあるToolMessageは保持する(self) -> None:
+        ai_msg = AIMessage(
+            content="",
+            tool_calls=[
+                {"name": "read_file", "args": {}, "id": "tc-1", "type": "tool_call"}
+            ],
+        )
+        tool_msg = ToolMessage(
+            content="file content", tool_call_id="tc-1", name="read_file"
+        )
+        result = _remove_orphaned_tool_messages([ai_msg, tool_msg])
+        assert len(result) == 2
+        assert result[0] is ai_msg
+        assert result[1] is tool_msg
+
+    def test_切り詰め後の典型パターンを正しく処理する(self) -> None:
+        """AIMessage(tool_calls)が切り捨てられた場合にToolMessageを除去する."""
+        # AIMessage は切り詰めで失われた想定（リストに含まれていない）
+        orphan1 = ToolMessage(
+            content="r1", tool_call_id="tc-lost-1", name="tool_a"
+        )
+        orphan2 = ToolMessage(
+            content="r2", tool_call_id="tc-lost-2", name="tool_b"
+        )
+        # 以降の通常会話は保持される
+        human = HumanMessage(content="次の質問")
+        ai = AIMessage(content="回答")
+
+        result = _remove_orphaned_tool_messages([orphan1, orphan2, human, ai])
+        assert len(result) == 2
+        assert result[0] is human
+        assert result[1] is ai
+
+    def test_複数tool_callsを持つAIMessageも正しく処理する(self) -> None:
+        ai_msg = AIMessage(
+            content="",
+            tool_calls=[
+                {"name": "tool_a", "args": {}, "id": "tc-a", "type": "tool_call"},
+                {"name": "tool_b", "args": {}, "id": "tc-b", "type": "tool_call"},
+            ],
+        )
+        tool_a = ToolMessage(content="a", tool_call_id="tc-a", name="tool_a")
+        tool_b = ToolMessage(content="b", tool_call_id="tc-b", name="tool_b")
+
+        result = _remove_orphaned_tool_messages([ai_msg, tool_a, tool_b])
+        assert len(result) == 3
+
+    def test_空リストはそのまま返す(self) -> None:
+        assert _remove_orphaned_tool_messages([]) == []
+
+    def test_truncate_messages後に孤立ToolMessageが除去される(self) -> None:
+        """_truncate_messages が切り詰め後に孤立ToolMessageを除去するか確認."""
+        fixed = [
+            SystemMessage(content="sys"),
+            HumanMessage(content="first"),
+        ]
+        # 21件の会話で、最初のAI+2ToolMessageが切り捨てられるシナリオ
+        ai_with_tools = AIMessage(
+            content="",
+            tool_calls=[
+                {"name": "tool_x", "args": {}, "id": "tc-x", "type": "tool_call"},
+                {"name": "tool_y", "args": {}, "id": "tc-y", "type": "tool_call"},
+            ],
+        )
+        tool_x = ToolMessage(content="x", tool_call_id="tc-x", name="tool_x")
+        tool_y = ToolMessage(content="y", tool_call_id="tc-y", name="tool_y")
+        # ai_with_toolsが切り捨て圏外になるよう、後続に20件以上追加
+        extra = [AIMessage(content=f"msg{i}") for i in range(20)]
+
+        # ai_with_tools + tool_x + tool_y + extra 23件 → 末尾20件に切り詰め
+        # → ai_with_toolsが失われ、tool_x, tool_yが孤立 → 除去される
+        msgs = fixed + [ai_with_tools, tool_x, tool_y] + extra
+        result = _truncate_messages(msgs)
+
+        # 孤立ToolMessageはない
+        for msg in result:
+            if isinstance(msg, ToolMessage):
+                # 対応するAIMessageが直前にあるか確認
+                idx = result.index(msg)
+                assert idx > 0, "ToolMessageの前にメッセージが必要"
+                prev = result[idx - 1]
+                assert hasattr(prev, "tool_calls"), "前のメッセージにtool_callsが必要"
 
 
 class Test_truncate_messages:

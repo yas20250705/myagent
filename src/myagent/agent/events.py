@@ -19,6 +19,10 @@ EventType = Literal[
     "confirm_request",
     "agent_complete",
     "agent_error",
+    "parallel_start",
+    "worker_start",
+    "worker_end",
+    "parallel_end",
 ]
 
 
@@ -90,4 +94,59 @@ class AgentEvent:
         return AgentEvent(
             event_type="agent_error",
             data={"error": error},
+        )
+
+    @staticmethod
+    def parallel_start(total_workers: int, task_descriptions: list[str]) -> AgentEvent:
+        """並列実行開始イベントを作成する."""
+        return AgentEvent(
+            event_type="parallel_start",
+            data={
+                "total_workers": total_workers,
+                "task_descriptions": task_descriptions,
+            },
+        )
+
+    @staticmethod
+    def worker_start(worker_id: str, task_description: str) -> AgentEvent:
+        """ワーカー開始イベントを作成する."""
+        return AgentEvent(
+            event_type="worker_start",
+            data={"worker_id": worker_id, "task_description": task_description},
+        )
+
+    @staticmethod
+    def worker_end(
+        worker_id: str,
+        task_description: str,
+        is_success: bool,
+        result: str = "",
+    ) -> AgentEvent:
+        """ワーカー完了イベントを作成する."""
+        return AgentEvent(
+            event_type="worker_end",
+            data={
+                "worker_id": worker_id,
+                "task_description": task_description,
+                "is_success": is_success,
+                "result": result,
+            },
+        )
+
+    @staticmethod
+    def parallel_end(
+        total: int,
+        succeeded: int,
+        failed: int,
+        summary: str = "",
+    ) -> AgentEvent:
+        """並列実行完了イベントを作成する."""
+        return AgentEvent(
+            event_type="parallel_end",
+            data={
+                "total": total,
+                "succeeded": succeeded,
+                "failed": failed,
+                "summary": summary,
+            },
         )

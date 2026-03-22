@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -12,7 +12,8 @@ from myagent.infra.config import AppConfig
 class TestCreate_runner:
     """_create_runner のテスト."""
 
-    def test_設定からAgentRunnerを構築できる(self) -> None:
+    @pytest.mark.asyncio
+    async def test_設定からAgentRunnerを構築できる(self) -> None:
         config = AppConfig()
         with patch("myagent.cli.app.LLMRouter") as mock_router_cls:
             mock_router = MagicMock()
@@ -21,10 +22,15 @@ class TestCreate_runner:
             mock_router_cls.return_value = mock_router
 
             with patch("myagent.cli.app.AgentRunner") as mock_runner_cls:
-                from myagent.cli.app import _create_runner
+                with patch("myagent.cli.app.MCPManager") as mock_mcp_cls:
+                    mock_mcp = AsyncMock()
+                    mock_mcp.connect_all = AsyncMock()
+                    mock_mcp_cls.return_value = mock_mcp
 
-                _create_runner(config)
-                mock_runner_cls.assert_called_once()
+                    from myagent.cli.app import _create_runner
+
+                    await _create_runner(config)
+                    mock_runner_cls.assert_called_once()
 
 
 class TestRun_oneshot:
@@ -41,8 +47,14 @@ class TestRun_oneshot:
 
         mock_runner = MagicMock()
         mock_runner.run_with_events = mock_run_with_events
+        mock_mcp_manager = AsyncMock()
+        mock_mcp_manager.disconnect_all = AsyncMock()
 
-        with patch("myagent.cli.app._create_runner", return_value=mock_runner):
+        with patch(
+            "myagent.cli.app._create_runner",
+            new_callable=AsyncMock,
+            return_value=(mock_runner, mock_mcp_manager),
+        ):
             with patch("myagent.cli.app.handle_event") as mock_handle:
                 with patch("myagent.cli.app.console"):
                     from myagent.cli.app import run_oneshot
@@ -60,8 +72,14 @@ class TestRun_oneshot:
 
         mock_runner = MagicMock()
         mock_runner.run_with_events = failing_run_with_events
+        mock_mcp_manager = AsyncMock()
+        mock_mcp_manager.disconnect_all = AsyncMock()
 
-        with patch("myagent.cli.app._create_runner", return_value=mock_runner):
+        with patch(
+            "myagent.cli.app._create_runner",
+            new_callable=AsyncMock,
+            return_value=(mock_runner, mock_mcp_manager),
+        ):
             with patch("myagent.cli.app.print_error") as mock_print_error:
                 with patch("myagent.cli.app.console"):
                     from myagent.cli.app import run_oneshot

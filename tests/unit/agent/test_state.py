@@ -19,6 +19,30 @@ class TestSubTask:
         task.result = "完了しました"
         assert task.is_completed is True
 
+    def test_依存関係フィールドのデフォルト値(self) -> None:
+        task = SubTask(description="テストタスク")
+        assert task.task_id == ""
+        assert task.depends_on == []
+        assert task.target_files == []
+
+    def test_後方互換性_既存コンストラクタが動作する(self) -> None:
+        task = SubTask(description="テスト", is_completed=True, result="完了")
+        assert task.description == "テスト"
+        assert task.is_completed is True
+        assert task.task_id == ""
+        assert task.depends_on == []
+
+    def test_依存関係フィールドを指定して生成できる(self) -> None:
+        task = SubTask(
+            description="ファイル修正",
+            task_id="t1",
+            depends_on=["t0"],
+            target_files=["src/foo.py", "src/bar.py"],
+        )
+        assert task.task_id == "t1"
+        assert task.depends_on == ["t0"]
+        assert task.target_files == ["src/foo.py", "src/bar.py"]
+
 
 class TestToolCallRecord:
     """ToolCallRecord のテスト."""

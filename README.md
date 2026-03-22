@@ -4,10 +4,14 @@
 
 ## 特徴
 
-- **自律的な開発支援** — ファイル操作・コード検索・シェル実行を LLM が自律的に組み合わせてタスクを遂行
-- **マルチ LLM 対応** — OpenAI (gpt-4o-mini) と Google Gemini (gemini-2.0-flash) を切り替え可能。障害時は自動フォールバック
+- **自律的な開発支援** — ファイル操作・コード検索・シェル実行・Web検索を LLM が自律的に組み合わせてタスクを遂行
+- **マルチ LLM 対応** — OpenAI と Google Gemini を切り替え可能。障害時は自動フォールバック
+- **マルチエージェント並列実行** — Planner がサブタスクの依存関係を分析し、独立したタスクを並列実行
+- **MCP 対応** — Model Context Protocol で外部サービス（GitHub・DB・Slack 等）のツールを動的追加
+- **スキル / カスタムコマンド / プラグイン** — TOML や Markdown でワークフローを定義・共有・拡張
 - **ストリーミング出力** — 生成テキストをリアルタイム表示し、ツール実行状況も可視化
 - **セキュリティ制限** — プロジェクトルート外へのアクセス禁止、危険コマンドのブロック
+- **LangSmith モニタリング** — トレース・LLM コスト・ツール実行を可視化（オプション）
 - **REPL / ワンショット** — 対話型 REPL とワンショット実行の両モードに対応
 
 ## 必要環境
@@ -20,36 +24,57 @@
 
 ```bash
 git clone <repository-url>
-cd myagent
+cd MyCode
 uv sync
 ```
 
 > OneDrive など hardlink が使えない環境では `UV_LINK_MODE=copy uv sync` を使用してください。
 
+### グローバルインストール（任意のディレクトリで `myagent` を実行）
+
+```bash
+uv tool install .
+# OneDrive 環境の場合
+uv tool install --link-mode=copy .
+```
+
 ## 設定
 
 ### API キー
 
-環境変数で設定します。
+`.env.example` をコピーして `.env` を作成します。
 
 ```bash
-export OPENAI_API_KEY="sk-..."
-export GOOGLE_API_KEY="AIza..."
+cp .env.example .env
+```
+
+```env
+OPENAI_API_KEY=sk-...
+GOOGLE_API_KEY=AIza...
+EXA_API_KEY=your-exa-api-key...   # Web検索（オプション）
+
+# LangSmith トレース（オプション）
+# LANGCHAIN_TRACING_V2=true
+# LANGCHAIN_API_KEY=ls__...
+# LANGCHAIN_PROJECT=myagent
 ```
 
 ### 設定ファイル
 
-設定は `~/.myagent/config.toml` に保存されます。CLI コマンドで変更できます。
+設定は `~/.myagent/config.toml`（グローバル）または `.myagent/config.toml`（プロジェクトローカル）に保存されます。
 
 ```bash
 # 現在の設定を確認
 uv run myagent config
 
-# LLM プロバイダを変更 (openai / gemini)
-uv run myagent set-config --provider gemini
+# LLM プロバイダを変更
+uv run myagent set-config --provider gemini --model gemini-2.5-pro
 
-# モデルを変更
-uv run myagent set-config --model gemini-2.0-flash
+# フォールバック先を変更
+uv run myagent set-config --fallback-provider openai --fallback-model gpt-5-nano
+
+# 確認レベルを変更 (strict / normal / autonomous)
+uv run myagent set-config --confirmation-level autonomous
 ```
 
 ## 使い方
@@ -60,23 +85,36 @@ uv run myagent set-config --model gemini-2.0-flash
 uv run myagent
 ```
 
-プロンプトが表示されたら自然言語で指示を入力します。`exit` または `quit` で終了します。
-
 ```
-指示 > src/myagent/cli/app.py の run_repl 関数の動作を説明して
-指示 > tests/ 内のテストを全部確認して失敗しそうな箇所を教えて
-指示 > exit
+myagent> src/myagent/cli/app.py の run_repl 関数の動作を説明して
+myagent> tests/ を実行して失敗しているテストを修正して
+myagent> git status を確認してコミットメッセージを提案して
+myagent> exit
 ```
 
 ### ワンショットモード
 
 ```bash
-uv run myagent "README.md を読んで、プロジェクト概要を100字で要約して"
+uv run myagent --run "README.md を読んで、プロジェクト概要を100字で要約して"
+uv run myagent -r "src/ 以下の Python ファイルを一覧表示して"
+```
+
+### REPL 内管理コマンド
+
+エージェントを介さず直接実行できるコマンドです。スラッシュは省略可能です。
+
+```
+myagent> /help                          # ヘルプ表示
+myagent> /stats                         # セッションメトリクス
+myagent> /clear                         # 会話履歴のクリア
+myagent> /config                        # 現在の設定を表示
+myagent> /set-config --model gpt-5-nano # モデルを変更
+myagent> /plugin list                   # プラグイン一覧
+myagent> /skill list                    # スキル一覧
+myagent> /mcp list                      # MCP サーバー一覧
 ```
 
 ## 利用可能なツール
-
-エージェントは以下のツールを使ってタスクを遂行します。
 
 | ツール | 説明 |
 |--------|------|
@@ -87,21 +125,25 @@ uv run myagent "README.md を読んで、プロジェクト概要を100字で要
 | `glob_search` | glob パターンでファイルを検索 |
 | `grep_search` | 正規表現でファイル内容を検索 |
 | `run_command` | シェルコマンドを実行（危険コマンドはブロック） |
-
-すべてのファイルアクセスはプロジェクトルートに制限されます。
+| `web_search` | Web 検索（Exa / DuckDuckGo） |
+| `web_fetch` | URL のページ内容を取得 |
+| MCP ツール | 設定したMCPサーバーが提供するツール（動的追加） |
 
 ## アーキテクチャ
 
 ```
 src/myagent/
-├── cli/          # click コマンド、Rich 表示、prompt_toolkit REPL
-├── agent/        # LangGraph ReAct グラフ、AgentRunner、AgentEvent
+├── cli/          # Click コマンド、Rich 表示、REPL、管理コマンドルーター
+├── agent/        # LangGraph ReAct グラフ、Planner、Orchestrator、Critic
 ├── llm/          # LLMRouter（OpenAI/Gemini 切り替え、リトライ、フォールバック）
-├── tools/        # ファイル操作・シェル実行ツール群、ToolRegistry
-└── infra/        # 設定管理、カスタム例外
+├── tools/        # ファイル操作・シェル・Web・MCP ツール、ToolRegistry
+├── commands/     # カスタムコマンド（TOML 定義）
+├── skills/       # スキル拡張（SKILL.md 定義）
+├── plugins/      # プラグイン管理
+└── infra/        # 設定管理、コンテキスト圧縮、カスタム例外
 ```
 
-LangGraph の `StateGraph` で ReAct ループを実装しています。`agent_node` が LLM を呼び出し、ツール呼び出しが必要な場合は `tools` ノードへ遷移し、完了したら END に抜けます。
+LangGraph の `StateGraph` で ReAct ループを実装しています。`agent_node` が LLM を呼び出し、ツール呼び出しが必要な場合は `tools` ノードへ遷移し、完了したら END に抜けます。Planner がタスクを複数のサブタスクに分解すると、Orchestrator が依存関係を解析して並列実行します。
 
 ## 開発
 
@@ -119,14 +161,20 @@ uv run ruff check src/ tests/
 uv run ruff format src/ tests/
 
 # 型チェック
-uv run mypy
+uv run mypy src/
 ```
-
-テストは `tests/unit/` 以下に配置されており、118 テスト・カバレッジ 70% 以上を維持しています。
 
 ### Dev Container
 
 Visual Studio Code で「Reopen in Container」を選択すると、Python 3.12 環境と依存関係が自動でセットアップされます（Docker が必要です）。
+
+## ドキュメント
+
+| ファイル | 内容 |
+|---------|------|
+| [`docs/MANUAL.md`](docs/MANUAL.md) | 詳細な使い方・設定リファレンス |
+| [`docs/product-requirements.md`](docs/product-requirements.md) | プロダクト要求定義書 |
+| [`docs/architecture.md`](docs/architecture.md) | アーキテクチャ設計書 |
 
 ## ライセンス
 

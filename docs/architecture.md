@@ -43,8 +43,9 @@
 │   CLI レイヤー                            │ ← ユーザー入力・表示・確認フロー
 │   (CLIApp, Display, ConfirmationHandler) │
 ├──────────────────────────────────────────┤
-│   エージェントレイヤー                      │ ← 思考ループ・タスク分解・評価
-│   (AgentCore, Planner, Executor, Critic) │
+│   エージェントレイヤー                      │ ← 思考ループ・タスク分解・評価・並列実行
+│   (AgentCore, Planner, Executor, Critic, │
+│    Orchestrator)                         │
 ├──────────────────────────────────────────┤
 │   LLM レイヤー                            │ ← LLMプロバイダ抽象・ルーティング
 │   (LLMRouter, OpenAIProvider, Gemini...) │

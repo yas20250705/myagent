@@ -67,5 +67,5 @@ class Executor:
         if self.confirmation_level == "strict":
             return tool_name not in _READ_ONLY_TOOLS
 
-        # normal: 書き込み・破壊操作のみ確認
-        return tool_name in _WRITE_TOOLS
+        # normal: 書き込み・破壊操作、およびMCPツール（外部サービス操作）は確認
+        return tool_name in _WRITE_TOOLS or tool_name.startswith("mcp_")

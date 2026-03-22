@@ -77,6 +77,7 @@ class LLMRouter:
             return ChatOpenAI(
                 model=model,
                 temperature=self.config.temperature,
+                api_key=self.openai_api_key or None,
             )
         if provider == "gemini":
             from langchain_google_genai import ChatGoogleGenerativeAI
@@ -84,6 +85,7 @@ class LLMRouter:
             return ChatGoogleGenerativeAI(
                 model=model,
                 temperature=self.config.temperature,
+                google_api_key=self.google_api_key or None,
             )
         msg = f"未対応のプロバイダ: {provider}"
         raise LLMError(msg)

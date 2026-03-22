@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from myagent.agent.critic import Critic
 
@@ -171,3 +171,146 @@ class TestCriticのdetect_loop:
         )
         # window=1 では1件しか見ないのでFalse
         assert critic.detect_loop([old_msg1, old_msg2, new_msg], window=1) is False
+
+
+class TestCriticのdetect_error_repetition:
+    """Critic.detect_error_repetition のテスト."""
+
+    def test_メッセージが空の場合は検知しない(self) -> None:
+        critic = Critic()
+        detected, msg = critic.detect_error_repetition([])
+        assert detected is False
+        assert msg == ""
+
+    def test_エラーが閾値未満では検知しない(self) -> None:
+        critic = Critic()
+        msgs = [
+            ToolMessage(
+                content="Error: ファイルが見つかりません",
+                tool_call_id="1",
+                name="read_file",
+            ),
+            ToolMessage(
+                content="Error: ファイルが見つかりません",
+                tool_call_id="2",
+                name="read_file",
+            ),
+        ]
+        detected, msg = critic.detect_error_repetition(msgs, threshold=3)
+        assert detected is False
+
+    def test_同一エラーが閾値以上で検知する(self) -> None:
+        critic = Critic()
+        msgs = [
+            ToolMessage(
+                content="Error: ファイルが見つかりません",
+                tool_call_id="1",
+                name="read_file",
+            ),
+            ToolMessage(
+                content="Error: ファイルが見つかりません",
+                tool_call_id="2",
+                name="read_file",
+            ),
+            ToolMessage(
+                content="Error: ファイルが見つかりません",
+                tool_call_id="3",
+                name="read_file",
+            ),
+        ]
+        detected, msg = critic.detect_error_repetition(msgs, threshold=3)
+        assert detected is True
+        assert "read_file" in msg
+        assert "3回" in msg
+
+    def test_異なるツールのエラーは別カウント(self) -> None:
+        critic = Critic()
+        msgs = [
+            ToolMessage(
+                content="Error: ファイルが見つかりません",
+                tool_call_id="1",
+                name="read_file",
+            ),
+            ToolMessage(
+                content="Error: ファイルが見つかりません",
+                tool_call_id="2",
+                name="write_file",
+            ),
+            ToolMessage(
+                content="Error: ファイルが見つかりません",
+                tool_call_id="3",
+                name="read_file",
+            ),
+        ]
+        detected, _ = critic.detect_error_repetition(msgs, threshold=3)
+        assert detected is False
+
+    def test_異なるエラーメッセージは別カウント(self) -> None:
+        critic = Critic()
+        msgs = [
+            ToolMessage(
+                content="Error: ファイルが見つかりません",
+                tool_call_id="1",
+                name="read_file",
+            ),
+            ToolMessage(
+                content="Error: パーミッションが拒否されました",
+                tool_call_id="2",
+                name="read_file",
+            ),
+            ToolMessage(
+                content="Error: ファイルが見つかりません",
+                tool_call_id="3",
+                name="read_file",
+            ),
+        ]
+        detected, _ = critic.detect_error_repetition(msgs, threshold=3)
+        assert detected is False
+
+    def test_エラーキーワードを含まないメッセージは無視(self) -> None:
+        critic = Critic()
+        msgs = [
+            ToolMessage(
+                content="ファイルの内容: hello world",
+                tool_call_id="1",
+                name="read_file",
+            ),
+            ToolMessage(
+                content="ファイルの内容: hello world",
+                tool_call_id="2",
+                name="read_file",
+            ),
+            ToolMessage(
+                content="ファイルの内容: hello world",
+                tool_call_id="3",
+                name="read_file",
+            ),
+        ]
+        detected, _ = critic.detect_error_repetition(msgs, threshold=3)
+        assert detected is False
+
+    def test_AIMessageとHumanMessageが混在しても正しく検知(self) -> None:
+        critic = Critic()
+        msgs = [
+            HumanMessage(content="ファイルを読んで"),
+            AIMessage(content="", tool_calls=[]),
+            ToolMessage(
+                content="Error: not found",
+                tool_call_id="1",
+                name="read_file",
+            ),
+            HumanMessage(content="もう一度"),
+            ToolMessage(
+                content="Error: not found",
+                tool_call_id="2",
+                name="read_file",
+            ),
+            ToolMessage(
+                content="Error: not found",
+                tool_call_id="3",
+                name="read_file",
+            ),
+        ]
+        detected, msg = critic.detect_error_repetition(msgs, threshold=3)
+        assert detected is True
+        assert "別のアプローチ" in msg
