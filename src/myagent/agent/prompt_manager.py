@@ -65,6 +65,7 @@ class PromptManager:
         task_type: TaskType = "general",
         project_index: str | None = None,
         working_directory: str = "",
+        skills_context: str | None = None,
     ) -> str:
         """タスク種別に応じたシステムプロンプトを構築する.
 
@@ -75,6 +76,8 @@ class PromptManager:
             task_type: タスク種別。
             project_index: プロジェクトファイルツリー文字列。
             working_directory: 作業ディレクトリの絶対パス。
+            skills_context: スキルカタログセクション。
+                SkillManager.build_skills_context_section() の出力を渡す。
 
         Returns:
             構築されたシステムプロンプト。
@@ -95,6 +98,10 @@ class PromptManager:
                 f"例: `subdir/file.txt`（`{working_directory}/subdir/file.txt` や "
                 f"作業ディレクトリ名を含むパスは使わないこと）"
             )
+
+        # スキルカタログを追加（セッション開始時に1回のみ注入）
+        if skills_context:
+            parts.append(skills_context)
 
         # タスク種別固有のテンプレートを追加
         template_name = _TASK_TEMPLATES.get(task_type)

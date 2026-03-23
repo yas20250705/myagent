@@ -140,3 +140,45 @@ class TestPromptManager:
         result = manager._load_template("nonexistent.txt")
 
         assert result == ""
+
+    def test_skills_contextが注入される(self, tmp_path: Path) -> None:
+        """skills_context が指定された場合、プロンプトに含まれること."""
+        prompts_dir = tmp_path / "prompts"
+        prompts_dir.mkdir()
+        (prompts_dir / "base.txt").write_text("ベース", encoding="utf-8")
+
+        manager = PromptManager(prompts_dir=prompts_dir)
+        skills_ctx = "## 利用可能なスキル\n\n- **my-skill**: テストスキルの説明\n"
+        result = manager.build_prompt(skills_context=skills_ctx)
+
+        assert "利用可能なスキル" in result
+        assert "my-skill" in result
+
+    def test_skills_contextがNoneの場合は注入されない(self, tmp_path: Path) -> None:
+        """skills_context が None の場合、プロンプトに含まれないこと."""
+        prompts_dir = tmp_path / "prompts"
+        prompts_dir.mkdir()
+        (prompts_dir / "base.txt").write_text("ベースのみ", encoding="utf-8")
+
+        manager = PromptManager(prompts_dir=prompts_dir)
+        result = manager.build_prompt(skills_context=None)
+
+        assert result == "ベースのみ"
+
+    def test_skills_contextはworking_directoryの後に来る(
+        self, tmp_path: Path
+    ) -> None:
+        """skills_context は作業ディレクトリの後に配置されること."""
+        prompts_dir = tmp_path / "prompts"
+        prompts_dir.mkdir()
+        (prompts_dir / "base.txt").write_text("ベース", encoding="utf-8")
+
+        manager = PromptManager(prompts_dir=prompts_dir)
+        result = manager.build_prompt(
+            working_directory="/some/dir",
+            skills_context="## スキル\n\n- **test**: 説明\n",
+        )
+
+        wd_pos = result.index("作業ディレクトリ")
+        skills_pos = result.index("スキル")
+        assert wd_pos < skills_pos

@@ -255,6 +255,14 @@ def _validate_frontmatter(
         str(raw_tools).split() if raw_tools else []
     )
 
+    # disable-model-invocation: LLM自動選択から除外するか
+    raw_dmi = frontmatter.get("disable-model-invocation", False)
+    disable_model_invocation: bool = bool(raw_dmi)
+
+    # user-invocable: スラッシュコマンドで表示するか
+    raw_ui = frontmatter.get("user-invocable", True)
+    user_invocable: bool = bool(raw_ui)
+
     return SkillMetadata(
         name=name,
         description=description,
@@ -264,4 +272,6 @@ def _validate_frontmatter(
         compatibility=str(compatibility).strip() if compatibility else None,
         metadata=meta_dict,
         allowed_tools=allowed_tools,
+        disable_model_invocation=disable_model_invocation,
+        user_invocable=user_invocable,
     )

@@ -19,6 +19,8 @@ class SkillMetadata:
     compatibility: str | None = None
     metadata: dict[str, str] = field(default_factory=dict)
     allowed_tools: list[str] = field(default_factory=list)
+    disable_model_invocation: bool = False
+    user_invocable: bool = True
 
     @property
     def skill_md_path(self) -> Path:

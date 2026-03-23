@@ -186,6 +186,137 @@ class TestSkillManagerActivate:
         assert skill is None
 
 
+def _make_skill_with_flags(
+    skills_dir: Path,
+    name: str,
+    description: str,
+    disable_model_invocation: bool = False,
+    user_invocable: bool = True,
+) -> Path:
+    """テスト用スキル（新フィールド付き）を作成する."""
+    skill_dir = skills_dir / name
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    flags = ""
+    if disable_model_invocation:
+        flags += "\ndisable-model-invocation: true"
+    if not user_invocable:
+        flags += "\nuser-invocable: false"
+    (skill_dir / "SKILL.md").write_text(
+        f"""\
+---
+name: {name}
+description: {description}{flags}
+---
+
+# {name}
+""",
+        encoding="utf-8",
+    )
+    return skill_dir
+
+
+class TestBuildSkillsContextSection:
+    """build_skills_context_section のテスト."""
+
+    def test_returns_section_with_skills(self, tmp_path: Path) -> None:
+        """スキルカタログセクションが返されること."""
+        project_dir = tmp_path / "skills"
+        _make_skill(project_dir, "my-skill", "テストスキルの説明")
+
+        manager = SkillManager(
+            project_skills_dir=project_dir,
+            global_skills_dir=tmp_path / "no-global",
+        )
+        section = manager.build_skills_context_section()
+
+        assert "my-skill" in section
+        assert "テストスキルの説明" in section
+        assert "activate_skill" in section
+
+    def test_excludes_disable_model_invocation(self, tmp_path: Path) -> None:
+        """disable_model_invocation=True のスキルは除外されること."""
+        project_dir = tmp_path / "skills"
+        _make_skill(project_dir, "normal-skill", "通常スキル")
+        _make_skill_with_flags(
+            project_dir, "hidden-skill", "除外スキル", disable_model_invocation=True
+        )
+
+        manager = SkillManager(
+            project_skills_dir=project_dir,
+            global_skills_dir=tmp_path / "no-global",
+        )
+        section = manager.build_skills_context_section()
+
+        assert "normal-skill" in section
+        assert "hidden-skill" not in section
+
+    def test_returns_empty_when_no_skills(self, tmp_path: Path) -> None:
+        """スキルが存在しない場合は空文字列を返すこと."""
+        manager = SkillManager(
+            project_skills_dir=tmp_path / "empty",
+            global_skills_dir=tmp_path / "no-global",
+        )
+        section = manager.build_skills_context_section()
+
+        assert section == ""
+
+    def test_all_skills_disabled_returns_empty(self, tmp_path: Path) -> None:
+        """全スキルが disable_model_invocation=True の場合は空文字列."""
+        project_dir = tmp_path / "skills"
+        _make_skill_with_flags(
+            project_dir, "hidden-skill", "除外スキル", disable_model_invocation=True
+        )
+
+        manager = SkillManager(
+            project_skills_dir=project_dir,
+            global_skills_dir=tmp_path / "no-global",
+        )
+        section = manager.build_skills_context_section()
+
+        assert section == ""
+
+    def test_project_skills_before_global(self, tmp_path: Path) -> None:
+        """プロジェクトスキルがグローバルより優先されること（順序）."""
+        project_dir = tmp_path / "project" / "skills"
+        global_dir = tmp_path / "global" / "skills"
+        _make_skill(project_dir, "zzz-project-skill", "プロジェクトスキル")
+        _make_skill(global_dir, "aaa-global-skill", "グローバルスキル")
+
+        manager = SkillManager(
+            project_skills_dir=project_dir,
+            global_skills_dir=global_dir,
+        )
+        section = manager.build_skills_context_section()
+
+        # プロジェクトスキルがグローバルスキルより先に出現すること
+        assert section.index("zzz-project-skill") < section.index("aaa-global-skill")
+
+    def test_budget_truncates_skills(self, tmp_path: Path) -> None:
+        """バジェット超過時にスキルが切り詰められること."""
+        project_dir = tmp_path / "skills"
+        # 長い説明を持つスキルを複数作成
+        for i in range(5):
+            _make_skill(project_dir, f"skill-{i:02d}", "x" * 500)
+
+        manager = SkillManager(
+            project_skills_dir=project_dir,
+            global_skills_dir=tmp_path / "no-global",
+        )
+        # context_window_tokens=800000 (16000 chars budget) では全部入る
+        full_section = manager.build_skills_context_section(
+            context_window_tokens=800_000
+        )
+        assert all(f"skill-{i:02d}" in full_section for i in range(5))
+
+        # context_window_tokens=5000 では budget = min(5000*2%*2, 16000) = 200文字
+        # ヘッダー(約100文字) + 各スキル行(skill-XX + 500文字説明 = 500+文字)なので1つ目も入らない可能性あり
+        # 少なくとも全5スキルは入らない
+        small_section = manager.build_skills_context_section(context_window_tokens=5000)
+        # 全スキルが入っていないこと
+        all_in = all(f"skill-{i:02d}" in small_section for i in range(5))
+        assert not all_in
+
+
 class TestSkillManagerFindMatching:
     """find_matching のテスト."""
 

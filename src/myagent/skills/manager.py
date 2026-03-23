@@ -12,6 +12,9 @@ from myagent.skills.models import Skill, SkillMetadata
 
 logger = logging.getLogger(__name__)
 
+_MAX_SKILLS_BUDGET_CHARS = 16_000
+_SKILLS_BUDGET_RATIO = 0.02  # コンテキストウィンドウの2%
+
 _DEFAULT_GLOBAL_SKILLS_DIR = Path.home() / ".myagent" / "skills"
 
 
@@ -111,6 +114,66 @@ class SkillManager:
         body = parse_skill_body(meta.skill_md_path)
         return Skill(meta=meta, body=body)
 
+    def build_skills_context_section(
+        self, context_window_tokens: int = 128_000
+    ) -> str:
+        """システムプロンプトに注入するスキルカタログセクションを構築する.
+
+        LLM自動選択の対象スキル（disable_model_invocation=False）のみを含む。
+        project スコープを優先し、バジェット上限内に収める。
+
+        Args:
+            context_window_tokens: コンテキストウィンドウのトークン数。
+
+        Returns:
+            スキルカタログのMarkdownテキスト。スキルが存在しない場合は空文字列。
+        """
+        if not self._loaded:
+            self.load_all()
+
+        # LLM自動選択の対象スキルのみ抽出
+        candidates = [
+            m for m in self._skills.values() if not m.disable_model_invocation
+        ]
+        if not candidates:
+            return ""
+
+        # project > global の優先度でソート（同スコープ内はアルファベット順）
+        scope_order = {"project": 0, "global": 1}
+        candidates.sort(key=lambda m: (scope_order[m.scope], m.name))
+
+        # バジェット上限計算 (1トークン ≈ 0.5文字 として逆算)
+        max_chars = min(
+            int(context_window_tokens * _SKILLS_BUDGET_RATIO * 2),
+            _MAX_SKILLS_BUDGET_CHARS,
+        )
+
+        header = (
+            "## 利用可能なスキル\n\n"
+            "以下のスキルが利用可能です。ユーザーの指示に関連するスキルが必要な場合は、"
+            "`activate_skill` ツールでアクティベートしてください。\n\n"
+        )
+        used_chars = len(header)
+        lines: list[str] = []
+
+        for meta in candidates:
+            line = f"- **{meta.name}**: {meta.description}\n"
+            if used_chars + len(line) > max_chars:
+                logger.warning(
+                    "スキルカタログがバジェット上限（%d文字）を超えました。"
+                    "スキル '%s' 以降は除外されます。",
+                    max_chars,
+                    meta.name,
+                )
+                break
+            lines.append(line)
+            used_chars += len(line)
+
+        if not lines:
+            return ""
+
+        return header + "".join(lines)
+
     def find_matching(self, instruction: str) -> list[SkillMetadata]:
         """ユーザーの指示文とスキルの description をマッチングする.
 
@@ -168,10 +231,13 @@ def _match_score(instruction_lower: str, description_lower: str) -> int:
     score = 0
 
     # スペース区切りの各単語マッチング（英語向け）
-    # \b を使った単語境界マッチング（"or"/"to" が "skill-creator" の部分文字列にマッチしないようにする）
+    # \b を使った単語境界マッチング
+    # ("or"/"to" が "skill-creator" の部分文字列にマッチしないようにする)
     words = [w for w in description_lower.split() if len(w) >= 2]
     score += sum(
-        1 for word in words if re.search(r"\b" + re.escape(word) + r"\b", instruction_lower)
+        1
+        for word in words
+        if re.search(r"\b" + re.escape(word) + r"\b", instruction_lower)
     )
 
     # description の先頭 N 文字の部分一致（日本語向け）

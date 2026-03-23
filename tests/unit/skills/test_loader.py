@@ -277,3 +277,102 @@ description: テスト
         errors = validate_skill_dir(skill_dir)
 
         assert any("一致" in e for e in errors)
+
+
+class TestParseSkillMdNewFields:
+    """F21で追加した新フロントマターフィールドのテスト."""
+
+    def test_disable_model_invocation_true(self, tmp_path: Path) -> None:
+        """disable-model-invocation: true が正しくパースされること."""
+        skill_dir = tmp_path / "my-skill"
+        _write_skill_md(
+            skill_dir,
+            """\
+---
+name: my-skill
+description: テストスキル
+disable-model-invocation: true
+---
+""",
+        )
+
+        meta = parse_skill_md(skill_dir / "SKILL.md", "global")
+
+        assert meta is not None
+        assert meta.disable_model_invocation is True
+
+    def test_disable_model_invocation_default_false(self, tmp_path: Path) -> None:
+        """disable-model-invocation が省略された場合はデフォルト False であること."""
+        skill_dir = tmp_path / "my-skill"
+        _write_skill_md(
+            skill_dir,
+            """\
+---
+name: my-skill
+description: テストスキル
+---
+""",
+        )
+
+        meta = parse_skill_md(skill_dir / "SKILL.md", "global")
+
+        assert meta is not None
+        assert meta.disable_model_invocation is False
+
+    def test_user_invocable_false(self, tmp_path: Path) -> None:
+        """user-invocable: false が正しくパースされること."""
+        skill_dir = tmp_path / "my-skill"
+        _write_skill_md(
+            skill_dir,
+            """\
+---
+name: my-skill
+description: テストスキル
+user-invocable: false
+---
+""",
+        )
+
+        meta = parse_skill_md(skill_dir / "SKILL.md", "global")
+
+        assert meta is not None
+        assert meta.user_invocable is False
+
+    def test_user_invocable_default_true(self, tmp_path: Path) -> None:
+        """user-invocable が省略された場合はデフォルト True であること."""
+        skill_dir = tmp_path / "my-skill"
+        _write_skill_md(
+            skill_dir,
+            """\
+---
+name: my-skill
+description: テストスキル
+---
+""",
+        )
+
+        meta = parse_skill_md(skill_dir / "SKILL.md", "global")
+
+        assert meta is not None
+        assert meta.user_invocable is True
+
+    def test_both_new_fields(self, tmp_path: Path) -> None:
+        """両方の新フィールドを同時に設定できること."""
+        skill_dir = tmp_path / "my-skill"
+        _write_skill_md(
+            skill_dir,
+            """\
+---
+name: my-skill
+description: テストスキル
+disable-model-invocation: true
+user-invocable: false
+---
+""",
+        )
+
+        meta = parse_skill_md(skill_dir / "SKILL.md", "global")
+
+        assert meta is not None
+        assert meta.disable_model_invocation is True
+        assert meta.user_invocable is False

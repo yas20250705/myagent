@@ -311,6 +311,7 @@ class AgentRunner:
         tool_registry: ToolRegistry | None = None,
         max_parallel_workers: int = 3,
         langsmith_project: str = "",
+        skills_context: str = "",
     ) -> None:
         self._model = model
         self._langsmith_project = langsmith_project
@@ -320,6 +321,7 @@ class AgentRunner:
         self._confirm_callback = confirm_callback
         self._context_manager = context_manager
         self._prompt_manager = prompt_manager or PromptManager()
+        self._skills_context = skills_context
         self._metrics = SessionMetrics()
         self._max_parallel_workers = max_parallel_workers
 
@@ -385,6 +387,7 @@ class AgentRunner:
         system_content = self._prompt_manager.build_prompt(
             project_index=project_index,
             working_directory=working_directory,
+            skills_context=self._skills_context or None,
         )
         return [
             SystemMessage(content=system_content),

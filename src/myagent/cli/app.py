@@ -32,6 +32,7 @@ from myagent.infra.context import ContextManager
 from myagent.llm.router import LLMRouter
 from myagent.plugins.manager import PluginManager
 from myagent.skills.manager import SkillManager
+from myagent.skills.skill_tool import ActivateSkillTool
 from myagent.tools.mcp_tools import MCPManager
 from myagent.tools.registry import create_default_registry
 
@@ -73,8 +74,8 @@ def _resolve_skill_input(
 ) -> tuple[str, str | None]:
     """スキルアクティベーションを解決して実際の入力とスキル名を返す.
 
-    スラッシュコマンド（/skill-name）または自動マッチングによってスキルを
-    アクティベートする。スキル本文をメッセージに注入して返す。
+    明示的スラッシュコマンド（/skill-name）のみ処理する。
+    通常入力のスキル選択はLLMが activate_skill ツールを通じて自律的に行う（F21）。
 
     Args:
         user_input: ユーザーの元の入力。
@@ -97,17 +98,9 @@ def _resolve_skill_input(
                 effective += f"\n\n## 指示\n\n{rest}"
             return effective, skill.meta.name
 
-    # 自動キーワードマッチング
-    matches = skill_manager.find_matching(user_input)
-    if matches:
-        skill = skill_manager.activate(matches[0].name)
-        if skill is not None:
-            effective = (
-                f"## アクティブスキル: {skill.meta.name}\n\n{skill.body}"
-                f"\n\n## 指示\n\n{user_input}"
-            )
-            return effective, skill.meta.name
-
+    # 通常入力: LLMが activate_skill ツールを使って自律的にスキルを選択する（F21）
+    # フォールバック: キーワードマッチングは find_matching() で引き続き利用可能だが、
+    # 自動起動は行わない（LLMに委任）
     return user_input, None
 
 
@@ -148,12 +141,15 @@ def _resolve_command_input(
         return user_input, None
 
 
-async def _create_runner(config: AppConfig) -> tuple[AgentRunner, MCPManager]:
+async def _create_runner(
+    config: AppConfig,
+) -> tuple[AgentRunner, MCPManager, SkillManager]:
     """設定からAgentRunnerとMCPManagerを構築する.
 
     Returns:
-        (AgentRunner, MCPManager) のタプル。
+        (AgentRunner, MCPManager, SkillManager) のタプル。
         MCPManagerはアプリ終了時に disconnect_all を呼ぶこと。
+        SkillManagerはスラッシュコマンドによるスキル解決に使い回す。
     """
     from pathlib import Path
 
@@ -196,6 +192,11 @@ async def _create_runner(config: AppConfig) -> tuple[AgentRunner, MCPManager]:
     if config.mcp.servers:
         await mcp_manager.connect_all(registry)
 
+    # activate_skill ツールを登録（LLM駆動スキル選択）
+    skill_manager_for_tool = _build_skill_manager(config)
+    activate_skill_tool = ActivateSkillTool(skill_manager=skill_manager_for_tool)
+    registry.register(activate_skill_tool)
+
     tools = registry.list_tools()
     executor = Executor(confirmation_level=config.tool.confirmation_level)
 
@@ -207,6 +208,10 @@ async def _create_runner(config: AppConfig) -> tuple[AgentRunner, MCPManager]:
     index_root = initial_cwd or Path.cwd()
     context_manager.build_project_index(index_root)
 
+    # スキルカタログをシステムプロンプトに注入（セッション開始時1回のみ）
+    skills_context = skill_manager_for_tool.build_skills_context_section(
+        context_window_tokens=config.agent.context_window_tokens
+    )
     prompt_manager = PromptManager()
 
     runner = AgentRunner(
@@ -220,8 +225,9 @@ async def _create_runner(config: AppConfig) -> tuple[AgentRunner, MCPManager]:
         tool_registry=registry,
         max_parallel_workers=config.agent.max_parallel_workers,
         langsmith_project=config.langchain_project if config.langchain_tracing else "",
+        skills_context=skills_context,
     )
-    return runner, mcp_manager
+    return runner, mcp_manager, skill_manager_for_tool
 
 
 async def run_oneshot(config: AppConfig, instruction: str) -> None:
@@ -233,8 +239,7 @@ async def run_oneshot(config: AppConfig, instruction: str) -> None:
     """
     mcp_manager = None
     try:
-        runner, mcp_manager = await _create_runner(config)
-        skill_manager = _build_skill_manager(config)
+        runner, mcp_manager, skill_manager = await _create_runner(config)
         command_manager = _build_command_manager(config)
 
         # カスタムコマンドの解決（スラッシュで始まる場合）
@@ -314,8 +319,7 @@ async def run_repl(config: AppConfig) -> None:
 
     session: PromptSession[str] = PromptSession(history=InMemoryHistory())
 
-    runner, mcp_manager = await _create_runner(config)
-    skill_manager = _build_skill_manager(config)
+    runner, mcp_manager, skill_manager = await _create_runner(config)
     command_manager = _build_command_manager(config)
     slash_router = SlashCommandRouter(config)
 
