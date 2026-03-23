@@ -87,6 +87,9 @@ secrets.json
 # Claude Code local settings
 .claude/settings.local.json
 
+# MCP server data (Playwright etc.)
+.playwright-mcp/
+
 # uv local environment config
 uv.toml
 
