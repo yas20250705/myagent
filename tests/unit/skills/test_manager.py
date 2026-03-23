@@ -349,3 +349,56 @@ class TestSkillManagerFindMatching:
         matches = manager.find_matching("全く関係ない指示xyz")
 
         assert matches == []
+
+
+class TestSkillManagerFindSimilar:
+    """find_similar のテスト."""
+
+    def test_タイポから正しいスキル名を提案する(self, tmp_path: Path) -> None:
+        project_dir = tmp_path / "skills"
+        _make_skill(project_dir, "techlearn", "技術学習スキル")
+        _make_skill(project_dir, "deploy", "デプロイスキル")
+
+        manager = SkillManager(
+            project_skills_dir=project_dir,
+            global_skills_dir=tmp_path / "no-global",
+        )
+        similar = manager.find_similar("techlean")
+
+        assert "techlearn" in similar
+
+    def test_完全一致はスキルが存在すれば候補に含む(self, tmp_path: Path) -> None:
+        project_dir = tmp_path / "skills"
+        _make_skill(project_dir, "deploy", "デプロイスキル")
+
+        manager = SkillManager(
+            project_skills_dir=project_dir,
+            global_skills_dir=tmp_path / "no-global",
+        )
+        similar = manager.find_similar("deploy")
+
+        assert "deploy" in similar
+
+    def test_全く異なる名前では候補が返らない(self, tmp_path: Path) -> None:
+        project_dir = tmp_path / "skills"
+        _make_skill(project_dir, "techlearn", "技術学習スキル")
+
+        manager = SkillManager(
+            project_skills_dir=project_dir,
+            global_skills_dir=tmp_path / "no-global",
+        )
+        similar = manager.find_similar("zzzzzzzzz")
+
+        assert similar == []
+
+    def test_空の名前では候補が返らない(self, tmp_path: Path) -> None:
+        project_dir = tmp_path / "skills"
+        _make_skill(project_dir, "techlearn", "技術学習スキル")
+
+        manager = SkillManager(
+            project_skills_dir=project_dir,
+            global_skills_dir=tmp_path / "no-global",
+        )
+        similar = manager.find_similar("")
+
+        assert similar == []

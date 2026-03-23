@@ -377,12 +377,16 @@ async def run_repl(config: AppConfig) -> None:
                     )
                     effective_input = skill_input
                 else:
-                    # 未定義コマンドの場合は類似コマンドを提案
+                    # 未定義コマンド/スキルの場合は類似候補を提案
                     from myagent.infra.errors import CommandNotFoundError
 
                     parts = user_input[1:].split(None, 1)
                     cmd_name_attempt = parts[0] if parts else ""
-                    similar = command_manager.find_similar(cmd_name_attempt)
+                    similar_cmds = command_manager.find_similar(cmd_name_attempt)
+                    similar_skills = skill_manager.find_similar(cmd_name_attempt)
+                    similar = similar_cmds + [
+                        s for s in similar_skills if s not in similar_cmds
+                    ]
                     if similar:
                         try:
                             raise CommandNotFoundError(cmd_name_attempt, similar)

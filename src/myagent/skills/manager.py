@@ -174,6 +174,35 @@ class SkillManager:
 
         return header + "".join(lines)
 
+    def find_similar(self, name: str, max_results: int = 3) -> list[str]:
+        """スキル名の類似候補を返す（タイポ補正用）.
+
+        編集距離ベースで類似するスキル名を検索する。
+
+        Args:
+            name: 検索するスキル名。
+            max_results: 返す候補の最大数。
+
+        Returns:
+            類似するスキル名のリスト（類似度の高い順）。
+        """
+        if not self._loaded:
+            self.load_all()
+
+        if not name or not self._skills:
+            return []
+
+        candidates: list[tuple[int, str]] = []
+        for skill_name in self._skills:
+            dist = _edit_distance(name.lower(), skill_name.lower())
+            # 編集距離が名前の長さの半分以下なら候補とする
+            threshold = max(len(name), len(skill_name)) // 2
+            if dist <= threshold:
+                candidates.append((dist, skill_name))
+
+        candidates.sort(key=lambda x: x[0])
+        return [c[1] for c in candidates[:max_results]]
+
     def find_matching(self, instruction: str) -> list[SkillMetadata]:
         """ユーザーの指示文とスキルの description をマッチングする.
 
@@ -248,3 +277,24 @@ def _match_score(instruction_lower: str, description_lower: str) -> int:
             score += 2
 
     return score
+
+
+def _edit_distance(s1: str, s2: str) -> int:
+    """レーベンシュタイン編集距離を計算する."""
+    if len(s1) < len(s2):
+        return _edit_distance(s2, s1)
+
+    if len(s2) == 0:
+        return len(s1)
+
+    prev_row = list(range(len(s2) + 1))
+    for i, c1 in enumerate(s1):
+        curr_row = [i + 1]
+        for j, c2 in enumerate(s2):
+            cost = 0 if c1 == c2 else 1
+            curr_row.append(
+                min(prev_row[j + 1] + 1, curr_row[j] + 1, prev_row[j] + cost)
+            )
+        prev_row = curr_row
+
+    return prev_row[-1]
