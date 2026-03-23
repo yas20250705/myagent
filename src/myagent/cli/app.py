@@ -14,6 +14,7 @@ from myagent.agent.executor import Executor
 from myagent.agent.graph import AgentRunner
 from myagent.agent.prompt_manager import PromptManager
 from myagent.cli.display import (
+    batch_confirm_action,
     confirm_action,
     console,
     handle_event,
@@ -174,17 +175,11 @@ async def _create_runner(
         initial_cwd=initial_cwd,
         web_search_api_key=config.exa_api_key,
         web_search_timeout=config.web_search.timeout,
-        web_search_default_num_results=(
-            config.web_search.default_num_results
-        ),
+        web_search_default_num_results=(config.web_search.default_num_results),
         web_fetch_timeout=config.web_fetch.timeout,
         web_fetch_max_size_bytes=config.web_fetch.max_size_bytes,
-        web_search_fallback_enabled=(
-            config.web_search.fallback_enabled
-        ),
-        web_search_backend_names=(
-            config.web_search.search_backends
-        ),
+        web_search_fallback_enabled=(config.web_search.fallback_enabled),
+        web_search_backend_names=(config.web_search.search_backends),
     )
 
     # MCPサーバーに接続してツールを動的登録する
@@ -220,6 +215,7 @@ async def _create_runner(
         max_loops=config.agent.max_loops,
         executor=executor,
         confirm_callback=confirm_action,
+        batch_confirm_callback=batch_confirm_action,
         context_manager=context_manager,
         prompt_manager=prompt_manager,
         tool_registry=registry,
@@ -264,9 +260,7 @@ async def run_oneshot(config: AppConfig, instruction: str) -> None:
                 instruction, skill_manager
             )
             if skill_name:
-                console.print(
-                    f"[cyan]スキル '{skill_name}' をアクティベート[/cyan]"
-                )
+                console.print(f"[cyan]スキル '{skill_name}' をアクティベート[/cyan]")
 
         async for event in runner.run_with_events(effective_input):
             handle_event(event)
@@ -404,9 +398,7 @@ async def run_repl(config: AppConfig) -> None:
                 user_input, skill_manager
             )
             if skill_name:
-                console.print(
-                    f"[cyan]スキル '{skill_name}' をアクティベート[/cyan]"
-                )
+                console.print(f"[cyan]スキル '{skill_name}' をアクティベート[/cyan]")
 
         try:
             async for event in runner.run_with_events(effective_input):

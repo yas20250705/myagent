@@ -20,6 +20,28 @@ from myagent.infra.config import (
 )
 from myagent.infra.errors import ConfigError
 
+# .env の MYAGENT_LLM_* 環境変数がテストに干渉しないよう、
+# load_config を呼ぶテストでは自動的にクリアする
+_LLM_ENV_VARS = [
+    "MYAGENT_LLM_PROVIDER",
+    "MYAGENT_LLM_MODEL",
+    "MYAGENT_LLM_FALLBACK_PROVIDER",
+    "MYAGENT_LLM_FALLBACK_MODEL",
+]
+
+
+@pytest.fixture(autouse=True)
+def _clear_llm_env_vars(monkeypatch: pytest.MonkeyPatch) -> None:
+    """テスト中に MYAGENT_LLM_* 環境変数を空にする.
+
+    load_config 内で load_dotenv() が呼ばれるため、delenv だと
+    .env から再読み込みされてしまう。空文字にセットすることで
+    load_dotenv(override=False) による再設定を防ぐ。
+    空文字は load_config 内の .strip() で空と判定されスキップされる。
+    """
+    for var in _LLM_ENV_VARS:
+        monkeypatch.setenv(var, "")
+
 
 class TestLLMConfigのデフォルト値:
     """LLMConfig のデフォルト値を検証する."""
@@ -98,6 +120,36 @@ class TestAgentConfigの並列ワーカー設定:
         assert config.agent.max_parallel_workers == 3
 
 
+class TestAgentConfigの並列ツール呼び出し設定:
+    """AgentConfig の max_parallel_tool_calls を検証する."""
+
+    def test_デフォルトmax_parallel_tool_callsは5(self) -> None:
+        from myagent.infra.config import AgentConfig
+
+        config = AgentConfig()
+        assert config.max_parallel_tool_calls == 5
+
+    def test_max_parallel_tool_callsをカスタム値で設定できる(self) -> None:
+        from myagent.infra.config import AgentConfig
+
+        config = AgentConfig(max_parallel_tool_calls=10)
+        assert config.max_parallel_tool_calls == 10
+
+    def test_max_parallel_tool_callsが範囲外でバリデーションエラー(self) -> None:
+        from pydantic import ValidationError
+
+        from myagent.infra.config import AgentConfig
+
+        with pytest.raises(ValidationError):
+            AgentConfig(max_parallel_tool_calls=0)
+        with pytest.raises(ValidationError):
+            AgentConfig(max_parallel_tool_calls=21)
+
+    def test_AppConfigにmax_parallel_tool_callsが含まれる(self) -> None:
+        config = AppConfig()
+        assert config.agent.max_parallel_tool_calls == 5
+
+
 class TestSkillConfigのデフォルト値:
     """SkillConfig のデフォルト値を検証する."""
 
@@ -174,6 +226,36 @@ class Testload_config:
         config = load_config(tmp_path / "nonexistent.toml")
         assert config.openai_api_key == "sk-test-key"
         assert config.google_api_key == "google-test-key"
+
+    def test_環境変数でLLMモデル設定を上書きする(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("MYAGENT_LLM_PROVIDER", "gemini")
+        monkeypatch.setenv("MYAGENT_LLM_MODEL", "gemini-2.5-pro")
+        config = load_config(tmp_path / "nonexistent.toml")
+        assert config.llm.provider == "gemini"
+        assert config.llm.model == "gemini-2.5-pro"
+
+    def test_環境変数でLLMフォールバック設定を上書きする(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("MYAGENT_LLM_FALLBACK_PROVIDER", "openai")
+        monkeypatch.setenv("MYAGENT_LLM_FALLBACK_MODEL", "gpt-5")
+        config = load_config(tmp_path / "nonexistent.toml")
+        assert config.llm.fallback_provider == "openai"
+        assert config.llm.fallback_model == "gpt-5"
+
+    def test_環境変数がconfig_tomlより優先される(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config_path = tmp_path / "config.toml"
+        config_path.write_text(
+            '[llm]\nprovider = "openai"\nmodel = "gpt-5-nano"\n',
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("MYAGENT_LLM_MODEL", "gemini-2.5-pro")
+        config = load_config(config_path)
+        assert config.llm.model == "gemini-2.5-pro"
 
 
 class Testsave_config:
@@ -292,9 +374,7 @@ class TestWebSearchConfigのフォールバック設定:
         assert config.fallback_enabled is False
 
     def test_search_backendsをカスタマイズできる(self) -> None:
-        config = WebSearchConfig(
-            search_backends=["duckduckgo"]
-        )
+        config = WebSearchConfig(search_backends=["duckduckgo"])
         assert config.search_backends == ["duckduckgo"]
 
     def test_AppConfigにフォールバック設定が含まれる(self) -> None:
@@ -302,9 +382,7 @@ class TestWebSearchConfigのフォールバック設定:
         assert config.web_search.fallback_enabled is True
         assert "exa" in config.web_search.search_backends
 
-    def test_save_load_でフォールバック設定が保持される(
-        self, tmp_path: Path
-    ) -> None:
+    def test_save_load_でフォールバック設定が保持される(self, tmp_path: Path) -> None:
         original = AppConfig(
             web_search=WebSearchConfig(
                 fallback_enabled=False,

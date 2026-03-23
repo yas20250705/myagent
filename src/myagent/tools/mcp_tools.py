@@ -37,33 +37,53 @@ _JSON_TYPE_MAP: dict[str, type] = {
     "integer": int,
     "number": float,
     "boolean": bool,
-    "array": list,
     "object": dict,
 }
 
 
+def _resolve_python_type(field_schema: dict[str, Any]) -> type:
+    """JSON Schema のフィールド定義から Python 型を解決する.
+
+    配列型の場合は items から要素型を解決し list[要素型] を返す。
+    Gemini API は配列型に items フィールドを必須とするため、
+    単なる list ではなく list[str] 等の具体的な型を返す必要がある。
+    """
+    json_type = field_schema.get("type", "string")
+
+    if json_type == "array":
+        items_schema = field_schema.get("items", {})
+        items_type_name = items_schema.get("type", "string")
+        item_type = _JSON_TYPE_MAP.get(items_type_name, str)
+        return list[item_type]  # type: ignore[valid-type]
+
+    return _JSON_TYPE_MAP.get(json_type, str)
+
+
 def _build_args_schema(
     tool_name: str, tool: MCPTool
-) -> type[Any] | None:
+) -> type[Any]:
     """MCPツールの inputSchema から Pydantic モデルを動的生成する.
 
     LLM に正確な入力スキーマを渡すために使用する。
-    スキーマが存在しない場合は None を返す。
+    プロパティが空の場合も空のモデルを返す。これにより LangChain が
+    ``_run(*args, **kwargs)`` シグネチャから ``items: {}`` を含む
+    不正なスキーマを自動生成することを防ぐ（Gemini API 互換性）。
     """
     input_schema = tool.inputSchema
     if not input_schema or not isinstance(input_schema, dict):
-        return None
+        # スキーマなし → 空のモデルを返す
+        return create_model(f"{tool_name}_schema")
 
     properties: dict[str, Any] = input_schema.get("properties", {})
     required_fields: list[str] = input_schema.get("required", [])
 
     if not properties:
-        return None
+        # プロパティなし → 空のモデルを返す
+        return create_model(f"{tool_name}_schema")
 
     field_definitions: dict[str, Any] = {}
     for field_name, field_schema in properties.items():
-        json_type = field_schema.get("type", "string")
-        python_type = _JSON_TYPE_MAP.get(json_type, str)
+        python_type = _resolve_python_type(field_schema)
         field_desc = field_schema.get("description", "")
         is_required = field_name in required_fields
         if is_required:
@@ -83,7 +103,7 @@ def _build_args_schema(
         return result
     except Exception:
         logger.debug("MCPツール '%s' の args_schema 生成に失敗しました", tool_name)
-        return None
+        return create_model(f"{tool_name}_schema")
 _MAX_RECONNECT_ATTEMPTS = 3
 
 

@@ -10,6 +10,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from myagent.agent.executor import Executor
 from myagent.agent.graph import (
     AgentRunner,
+    _detect_file_conflicts,
     _remove_orphaned_tool_messages,
     _truncate_messages,
     build_agent_graph,
@@ -263,12 +264,8 @@ class Test_remove_orphaned_tool_messages:
     def test_切り詰め後の典型パターンを正しく処理する(self) -> None:
         """AIMessage(tool_calls)が切り捨てられた場合にToolMessageを除去する."""
         # AIMessage は切り詰めで失われた想定（リストに含まれていない）
-        orphan1 = ToolMessage(
-            content="r1", tool_call_id="tc-lost-1", name="tool_a"
-        )
-        orphan2 = ToolMessage(
-            content="r2", tool_call_id="tc-lost-2", name="tool_b"
-        )
+        orphan1 = ToolMessage(content="r1", tool_call_id="tc-lost-1", name="tool_a")
+        orphan2 = ToolMessage(content="r2", tool_call_id="tc-lost-2", name="tool_b")
         # 以降の通常会話は保持される
         human = HumanMessage(content="次の質問")
         ai = AIMessage(content="回答")
@@ -742,3 +739,467 @@ class TestAgentRunnerのContextManager統合:
 
         await runner._maybe_compress_history()
         cm.compress_messages.assert_not_called()
+
+
+class Test_detect_file_conflicts:
+    """_detect_file_conflicts 関数のテスト."""
+
+    def test_書き込みツール同士の競合を検出する(self) -> None:
+        """同一ファイルへの write_file と edit_file は競合グループに分類される."""
+        tool_calls = [
+            {
+                "name": "write_file",
+                "args": {"file_path": "a.py", "content": "x"},
+                "id": "tc-1",
+            },
+            {
+                "name": "edit_file",
+                "args": {"file_path": "a.py", "old_string": "x", "new_string": "y"},
+                "id": "tc-2",
+            },
+        ]
+        non_conflict, conflict_groups = _detect_file_conflicts(tool_calls)
+        assert len(non_conflict) == 0
+        assert len(conflict_groups) == 1
+        assert len(conflict_groups[0]) == 2
+
+    def test_読み取りツールは競合対象外である(self) -> None:
+        """read_file, grep_search 等の読み取りツールは競合しない."""
+        tool_calls = [
+            {"name": "read_file", "args": {"file_path": "a.py"}, "id": "tc-1"},
+            {"name": "read_file", "args": {"file_path": "a.py"}, "id": "tc-2"},
+            {"name": "grep_search", "args": {"pattern": "test"}, "id": "tc-3"},
+        ]
+        non_conflict, conflict_groups = _detect_file_conflicts(tool_calls)
+        assert len(non_conflict) == 3
+        assert len(conflict_groups) == 0
+
+    def test_競合なしの場合に全callsが非競合グループに入る(self) -> None:
+        """異なるファイルへの書き込みは競合しない."""
+        tool_calls = [
+            {
+                "name": "write_file",
+                "args": {"file_path": "a.py", "content": "x"},
+                "id": "tc-1",
+            },
+            {
+                "name": "edit_file",
+                "args": {"file_path": "b.py", "old_string": "x", "new_string": "y"},
+                "id": "tc-2",
+            },
+            {"name": "read_file", "args": {"file_path": "c.py"}, "id": "tc-3"},
+        ]
+        non_conflict, conflict_groups = _detect_file_conflicts(tool_calls)
+        assert len(non_conflict) == 3
+        assert len(conflict_groups) == 0
+
+    def test_空リストはそのまま返す(self) -> None:
+        non_conflict, conflict_groups = _detect_file_conflicts([])
+        assert non_conflict == []
+        assert conflict_groups == []
+
+    def test_file_pathがない書き込みツールは非競合に分類される(self) -> None:
+        """file_pathが空または未指定の書き込みツールは非競合グループに入る."""
+        tool_calls = [
+            {"name": "write_file", "args": {"content": "x"}, "id": "tc-1"},
+        ]
+        non_conflict, conflict_groups = _detect_file_conflicts(tool_calls)
+        assert len(non_conflict) == 1
+        assert len(conflict_groups) == 0
+
+
+class Testtool_node_wrapperの一部拒否:
+    """tool_node_wrapper の一部拒否テスト."""
+
+    @pytest.mark.asyncio
+    async def test_一部拒否時に承認済みcallsが実行される(self) -> None:
+        """3つのtool_callsのうち1つが拒否されても、残り2つは実行される."""
+        from unittest.mock import patch
+
+        mock_model = MagicMock()
+        bound_model = MagicMock()
+        mock_model.bind_tools = MagicMock(return_value=bound_model)
+
+        # agent_nodeが3つのtool_callsを返し、2回目で完了
+        bound_model.ainvoke = AsyncMock(
+            side_effect=[
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "write_file",
+                            "args": {"file_path": "a.txt", "content": "a"},
+                            "id": "tc-1",
+                            "type": "tool_call",
+                        },
+                        {
+                            "name": "write_file",
+                            "args": {"file_path": "b.txt", "content": "b"},
+                            "id": "tc-2",
+                            "type": "tool_call",
+                        },
+                        {
+                            "name": "read_file",
+                            "args": {"file_path": "c.txt"},
+                            "id": "tc-3",
+                            "type": "tool_call",
+                        },
+                    ],
+                ),
+                AIMessage(content="完了"),
+            ]
+        )
+
+        executor = Executor(confirmation_level="normal")
+        # write_fileのうち1つ目だけ拒否
+        call_count = 0
+
+        def selective_deny(tool_name: str, tool_input: dict) -> bool:
+            nonlocal call_count
+            call_count += 1
+            if tool_name == "write_file" and tool_input.get("file_path") == "a.txt":
+                return False
+            return True
+
+        with patch("myagent.agent.graph.ToolNode") as mock_tn_cls:
+            mock_tn = MagicMock()
+            mock_tn.ainvoke = AsyncMock(
+                return_value={
+                    "messages": [
+                        ToolMessage(
+                            content="ok", tool_call_id="tc-2", name="write_file"
+                        ),
+                        ToolMessage(
+                            content="content", tool_call_id="tc-3", name="read_file"
+                        ),
+                    ]
+                }
+            )
+            mock_tn_cls.return_value = mock_tn
+
+            runner = AgentRunner(
+                model=mock_model,
+                tools=[],
+                max_loops=10,
+                executor=executor,
+                confirm_callback=selective_deny,
+            )
+            result = await runner.run("テスト")
+
+        # ToolNode.ainvokeが呼ばれた（全拒否ではないので実行される）
+        mock_tn.ainvoke.assert_called_once()
+        assert result == "完了"
+
+    @pytest.mark.asyncio
+    async def test_全拒否時にis_completedがTrueとなる(self) -> None:
+        """全てのtool_callsが拒否された場合は停止する."""
+        from unittest.mock import patch
+
+        mock_model = MagicMock()
+        bound_model = MagicMock()
+        mock_model.bind_tools = MagicMock(return_value=bound_model)
+        bound_model.ainvoke = AsyncMock(
+            side_effect=[
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "write_file",
+                            "args": {"file_path": "a.txt", "content": "a"},
+                            "id": "tc-1",
+                            "type": "tool_call",
+                        },
+                    ],
+                ),
+                AIMessage(content="了解しました"),
+            ]
+        )
+
+        executor = Executor(confirmation_level="normal")
+        deny_callback = MagicMock(return_value=False)
+
+        with patch("myagent.agent.graph.ToolNode") as mock_tn_cls:
+            mock_tn = MagicMock()
+            mock_tn.ainvoke = AsyncMock(return_value={"messages": []})
+            mock_tn_cls.return_value = mock_tn
+
+            runner = AgentRunner(
+                model=mock_model,
+                tools=[],
+                max_loops=10,
+                executor=executor,
+                confirm_callback=deny_callback,
+            )
+            result = await runner.run("テスト")
+
+        mock_tn.ainvoke.assert_not_called()
+        assert result == "了解しました"
+
+
+class Testbatch_confirm_callback:
+    """batch_confirm_callback のテスト."""
+
+    @pytest.mark.asyncio
+    async def test_バッチ確認で全承認時のテスト(self) -> None:
+        """batch_confirm_callbackが全てTrueを返すと全tool_callsが実行される."""
+        from unittest.mock import patch
+
+        mock_model = MagicMock()
+        bound_model = MagicMock()
+        mock_model.bind_tools = MagicMock(return_value=bound_model)
+        bound_model.ainvoke = AsyncMock(
+            side_effect=[
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "write_file",
+                            "args": {"file_path": "a.txt", "content": "a"},
+                            "id": "tc-1",
+                            "type": "tool_call",
+                        },
+                        {
+                            "name": "edit_file",
+                            "args": {
+                                "file_path": "b.txt",
+                                "old_string": "x",
+                                "new_string": "y",
+                            },
+                            "id": "tc-2",
+                            "type": "tool_call",
+                        },
+                    ],
+                ),
+                AIMessage(content="完了"),
+            ]
+        )
+
+        executor = Executor(confirmation_level="normal")
+        batch_cb = MagicMock(return_value=[True, True])
+
+        with patch("myagent.agent.graph.ToolNode") as mock_tn_cls:
+            mock_tn = MagicMock()
+            mock_tn.ainvoke = AsyncMock(
+                return_value={
+                    "messages": [
+                        ToolMessage(
+                            content="ok", tool_call_id="tc-1", name="write_file"
+                        ),
+                        ToolMessage(
+                            content="ok", tool_call_id="tc-2", name="edit_file"
+                        ),
+                    ]
+                }
+            )
+            mock_tn_cls.return_value = mock_tn
+
+            runner = AgentRunner(
+                model=mock_model,
+                tools=[],
+                max_loops=10,
+                executor=executor,
+                confirm_callback=None,
+                batch_confirm_callback=batch_cb,
+            )
+            result = await runner.run("テスト")
+
+        batch_cb.assert_called_once()
+        mock_tn.ainvoke.assert_called_once()
+        assert result == "完了"
+
+    @pytest.mark.asyncio
+    async def test_バッチ確認で一部拒否時のテスト(self) -> None:
+        """batch_confirm_callbackが一部Falseを返すと拒否分のみToolMessage生成."""
+        from unittest.mock import patch
+
+        mock_model = MagicMock()
+        bound_model = MagicMock()
+        mock_model.bind_tools = MagicMock(return_value=bound_model)
+        bound_model.ainvoke = AsyncMock(
+            side_effect=[
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "write_file",
+                            "args": {"file_path": "a.txt", "content": "a"},
+                            "id": "tc-1",
+                            "type": "tool_call",
+                        },
+                        {
+                            "name": "edit_file",
+                            "args": {
+                                "file_path": "b.txt",
+                                "old_string": "x",
+                                "new_string": "y",
+                            },
+                            "id": "tc-2",
+                            "type": "tool_call",
+                        },
+                    ],
+                ),
+                AIMessage(content="完了"),
+            ]
+        )
+
+        executor = Executor(confirmation_level="normal")
+        # 1つ目を承認、2つ目を拒否
+        batch_cb = MagicMock(return_value=[True, False])
+
+        with patch("myagent.agent.graph.ToolNode") as mock_tn_cls:
+            mock_tn = MagicMock()
+            mock_tn.ainvoke = AsyncMock(
+                return_value={
+                    "messages": [
+                        ToolMessage(
+                            content="ok", tool_call_id="tc-1", name="write_file"
+                        ),
+                    ]
+                }
+            )
+            mock_tn_cls.return_value = mock_tn
+
+            runner = AgentRunner(
+                model=mock_model,
+                tools=[],
+                max_loops=10,
+                executor=executor,
+                confirm_callback=None,
+                batch_confirm_callback=batch_cb,
+            )
+            result = await runner.run("テスト")
+
+        batch_cb.assert_called_once()
+        mock_tn.ainvoke.assert_called_once()
+        assert result == "完了"
+
+    @pytest.mark.asyncio
+    async def test_batch_confirm_callbackがNoneの場合に逐次確認にフォールバック(
+        self,
+    ) -> None:
+        """batch_confirm_callback=Noneの場合はconfirm_callbackで逐次確認."""
+        from unittest.mock import patch
+
+        mock_model = MagicMock()
+        bound_model = MagicMock()
+        mock_model.bind_tools = MagicMock(return_value=bound_model)
+        bound_model.ainvoke = AsyncMock(
+            side_effect=[
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "write_file",
+                            "args": {"file_path": "a.txt", "content": "a"},
+                            "id": "tc-1",
+                            "type": "tool_call",
+                        },
+                        {
+                            "name": "edit_file",
+                            "args": {
+                                "file_path": "b.txt",
+                                "old_string": "x",
+                                "new_string": "y",
+                            },
+                            "id": "tc-2",
+                            "type": "tool_call",
+                        },
+                    ],
+                ),
+                AIMessage(content="完了"),
+            ]
+        )
+
+        executor = Executor(confirmation_level="normal")
+        sequential_cb = MagicMock(return_value=True)
+
+        with patch("myagent.agent.graph.ToolNode") as mock_tn_cls:
+            mock_tn = MagicMock()
+            mock_tn.ainvoke = AsyncMock(
+                return_value={
+                    "messages": [
+                        ToolMessage(
+                            content="ok", tool_call_id="tc-1", name="write_file"
+                        ),
+                        ToolMessage(
+                            content="ok", tool_call_id="tc-2", name="edit_file"
+                        ),
+                    ]
+                }
+            )
+            mock_tn_cls.return_value = mock_tn
+
+            runner = AgentRunner(
+                model=mock_model,
+                tools=[],
+                max_loops=10,
+                executor=executor,
+                confirm_callback=sequential_cb,
+                batch_confirm_callback=None,
+            )
+            result = await runner.run("テスト")
+
+        # 逐次確認: 2回呼ばれる
+        assert sequential_cb.call_count == 2
+        mock_tn.ainvoke.assert_called_once()
+        assert result == "完了"
+
+    @pytest.mark.asyncio
+    async def test_確認対象が1件の場合はbatch_callbackを使わず逐次確認(self) -> None:
+        """needs_confirm_callsが1件のときbatch_confirm_callbackは呼ばれない."""
+        from unittest.mock import patch
+
+        mock_model = MagicMock()
+        bound_model = MagicMock()
+        mock_model.bind_tools = MagicMock(return_value=bound_model)
+        bound_model.ainvoke = AsyncMock(
+            side_effect=[
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "write_file",
+                            "args": {"file_path": "a.txt", "content": "a"},
+                            "id": "tc-1",
+                            "type": "tool_call",
+                        },
+                    ],
+                ),
+                AIMessage(content="完了"),
+            ]
+        )
+
+        executor = Executor(confirmation_level="normal")
+        sequential_cb = MagicMock(return_value=True)
+        batch_cb = MagicMock(return_value=[True])
+
+        with patch("myagent.agent.graph.ToolNode") as mock_tn_cls:
+            mock_tn = MagicMock()
+            mock_tn.ainvoke = AsyncMock(
+                return_value={
+                    "messages": [
+                        ToolMessage(
+                            content="ok",
+                            tool_call_id="tc-1",
+                            name="write_file",
+                        ),
+                    ]
+                }
+            )
+            mock_tn_cls.return_value = mock_tn
+
+            runner = AgentRunner(
+                model=mock_model,
+                tools=[],
+                max_loops=10,
+                executor=executor,
+                confirm_callback=sequential_cb,
+                batch_confirm_callback=batch_cb,
+            )
+            result = await runner.run("テスト")
+
+        # batch_cbは呼ばれない（1件なので逐次確認）
+        batch_cb.assert_not_called()
+        # 逐次確認: 1回呼ばれる
+        assert sequential_cb.call_count == 1
+        assert result == "完了"

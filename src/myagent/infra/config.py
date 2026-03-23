@@ -29,9 +29,7 @@ class WebSearchConfig(BaseModel):
     timeout: int = Field(default=25, ge=1, le=120)
     default_num_results: int = Field(default=5, ge=1, le=50)
     fallback_enabled: bool = True
-    search_backends: list[str] = Field(
-        default_factory=lambda: ["exa", "duckduckgo"]
-    )
+    search_backends: list[str] = Field(default_factory=lambda: ["exa", "duckduckgo"])
 
 
 class WebFetchConfig(BaseModel):
@@ -85,6 +83,7 @@ class AgentConfig(BaseModel):
     max_loops: int = Field(default=20, ge=1, le=100)
     context_window_tokens: int = Field(default=128_000, ge=1_000)
     max_parallel_workers: int = Field(default=3, ge=1, le=10)
+    max_parallel_tool_calls: int = Field(default=5, ge=1, le=20)
 
 
 class SkillConfig(BaseModel):
@@ -145,11 +144,7 @@ def merge_configs(base: dict[str, Any], override: dict[str, Any]) -> dict[str, A
     """
     merged: dict[str, Any] = dict(base)
     for key, value in override.items():
-        if (
-            key in merged
-            and isinstance(merged[key], dict)
-            and isinstance(value, dict)
-        ):
+        if key in merged and isinstance(merged[key], dict) and isinstance(value, dict):
             merged[key] = merge_configs(merged[key], value)
         else:
             merged[key] = value
@@ -221,6 +216,20 @@ def load_config(
     except Exception as e:
         msg = f"設定値のバリデーションに失敗しました: {e}"
         raise ConfigError(msg) from e
+
+    # 環境変数でLLMモデル設定を上書き
+    llm_provider = os.environ.get("MYAGENT_LLM_PROVIDER", "").strip()
+    llm_model = os.environ.get("MYAGENT_LLM_MODEL", "").strip()
+    llm_fallback_provider = os.environ.get("MYAGENT_LLM_FALLBACK_PROVIDER", "").strip()
+    llm_fallback_model = os.environ.get("MYAGENT_LLM_FALLBACK_MODEL", "").strip()
+    if llm_provider:
+        config.llm.provider = llm_provider  # type: ignore[assignment]
+    if llm_model:
+        config.llm.model = llm_model
+    if llm_fallback_provider:
+        config.llm.fallback_provider = llm_fallback_provider  # type: ignore[assignment]
+    if llm_fallback_model:
+        config.llm.fallback_model = llm_fallback_model
 
     # 環境変数でAPIキーを上書き
     openai_key = os.environ.get("OPENAI_API_KEY", "").strip()

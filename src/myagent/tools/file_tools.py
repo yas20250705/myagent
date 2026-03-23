@@ -101,7 +101,26 @@ class ReadFileTool(BaseTool):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     name: str = "read_file"
-    description: str = "ファイルの内容を読み取る。file_pathにファイルパスを指定する。"
+    description: str = (
+        "ファイルの内容を読み取る。file_pathに読み取り対象のファイルパス（絶対パスまたは相対パス）を指定する。"
+        "\n\n【出力形式】行番号付きで内容を返す（'  行番号\\tコンテンツ' の形式）。"
+        "行番号を使って後続のedit_fileで正確な編集位置を特定できる。"
+        "\n\n【対応ファイル形式】"
+        "テキストファイル: UTF-8エンコーディングで読み取る。"
+        "PDFファイル: .pdf拡張子を自動検知し、テキスト抽出して返す。"
+        "バイナリファイル: 自動検知し、読み取り不可のメッセージとファイルサイズを返す。"
+        "\n\n【エッジケース】"
+        "存在しないファイルを指定した場合はエラーメッセージを返す。"
+        "ディレクトリを指定した場合はエラーを返す（ディレクトリの内容確認にはlist_directoryを使うこと）。"
+        "大きなファイルは全行を返すため、必要な部分が分かっている場合はgrep_searchで該当箇所を特定してから読むことを推奨する。"
+        "\n\n【他ツールとの使い分け】"
+        "run_commandでcat/head/tail/less/moreを使う代わりに、必ずこのツールを使うこと。"
+        "ディレクトリの内容一覧 → list_directory。"
+        "ファイル内の特定文字列を探す → grep_search。"
+        "\n\n【アンチパターン】"
+        "ディレクトリパスを指定してはいけない（エラーになる）。"
+        "run_commandで cat/head/tail を実行してはいけない（このツールを使う）。"
+    )
     allowed_dirs: AllowedDirectories
     working_dir: WorkingDirectory | None = None
 
@@ -143,7 +162,27 @@ class WriteFileTool(BaseTool):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     name: str = "write_file"
-    description: str = "ファイルにコンテンツを書き込む。file_pathとcontentを指定する。"
+    description: str = (
+        "ファイルにコンテンツを書き込む。file_pathに書き込み先のファイルパス、contentに書き込む内容を指定する。"
+        "\n\n【動作】"
+        "指定パスにファイルを作成し、contentの内容を書き込む。"
+        "親ディレクトリが存在しない場合は自動的に作成する。"
+        "既存ファイルがある場合は全内容を上書きする（部分変更はできない）。"
+        "\n\n【edit_fileとの使い分け】"
+        "新規ファイル作成 → write_file。"
+        "ファイル全体の書き換え → write_file"
+        "（ただし事前にread_fileで既存内容を確認すること）。"
+        "既存ファイルの一部を変更 → edit_file（write_fileではなくedit_fileを使う）。"
+        "\n\n【エッジケース】"
+        "既存ファイルを上書きする場合、contentに全内容を指定する必要がある（差分ではなく完全な内容）。"
+        "既存ファイルの内容を確認せずに上書きすると、元の内容が失われるため、事前にread_fileで確認すること。"
+        "\n\n【アンチパターン】"
+        "既存ファイルの一部だけを変更したい場合にwrite_fileを使ってはいけない（edit_fileを使う）。"
+        "既存ファイルの内容をread_fileで確認せずに上書きしてはいけない。"
+        "run_commandでecho/catリダイレクト"
+        "（echo > file、cat << EOF > file）"
+        "を使ってはいけない（このツールを使う）。"
+    )
     allowed_dirs: AllowedDirectories
     working_dir: WorkingDirectory | None = None
 
@@ -169,8 +208,34 @@ class EditFileTool(BaseTool):
 
     name: str = "edit_file"
     description: str = (
-        "ファイル内のold_stringをnew_stringに置換する。"
-        "file_path, old_string, new_stringを指定する。"
+        "ファイル内の文字列を置換する。file_pathに対象ファイル、old_stringに置換前の文字列、new_stringに置換後の文字列を指定する。"
+        "\n\n【前提条件】使用前に必ずread_fileでファイル内容を確認すること。"
+        "ファイルを読まずにedit_fileを使うと、old_stringの指定を誤る原因になる。"
+        "\n\n【old_stringの一意性】"
+        "old_stringはファイル内で一意（1箇所のみ出現）でなければならない。"
+        "一意でない場合はエラーになる。対処法: "
+        "old_stringに前後の行を含めてコンテキストを追加し、一意にする。"
+        "例: 'return result' が複数箇所にある場合、"
+        "'def my_func():\\n    return result' のように"
+        "関数定義を含める。"
+        "\n\n【インデント保持】"
+        "old_stringとnew_stringのインデント（タブ/スペース）は、ファイル内の実際のインデントと完全に一致させること。"
+        "read_fileの出力で行番号の後のタブ以降がファイルの実際の内容。"
+        "\n\n【エッジケース】"
+        "存在しないファイルを指定した場合はエラーを返す。"
+        "old_stringがファイル内に見つからない場合はエラーを返す。"
+        "old_stringが複数箇所に出現する場合はエラーを返す"
+        "（前後の行を含めて一意にすること）。"
+        "\n\n【複数箇所の変更】"
+        "複数箇所を変更する場合は、edit_fileを複数回呼び出すこと"
+        "（1回の呼び出しで1箇所のみ置換）。"
+        "\n\n【他ツールとの使い分け】"
+        "既存ファイルの部分変更 → edit_file。"
+        "新規ファイル作成またはファイル全体の書き換え → write_file。"
+        "run_commandでsed/awkを使う代わりに、必ずこのツールを使うこと。"
+        "\n\n【アンチパターン】"
+        "read_fileでファイルを読まずにedit_fileを使ってはいけない。"
+        "run_commandでsed/awkを実行してはいけない（このツールを使う）。"
     )
     allowed_dirs: AllowedDirectories
     working_dir: WorkingDirectory | None = None
@@ -210,8 +275,23 @@ class ListDirectoryTool(BaseTool):
 
     name: str = "list_directory"
     description: str = (
-        "ディレクトリ内のファイルとサブディレクトリを一覧表示する。"
-        "pathにディレクトリパスを指定する。"
+        "ディレクトリ直下のファイルとサブディレクトリを一覧表示する。pathにディレクトリパスを指定する（省略時はカレントディレクトリ）。"
+        "\n\n【出力形式】"
+        "ファイル名を1行1件で表示する。ディレクトリ名には末尾に '/' が付く。"
+        "空のディレクトリの場合は '(空のディレクトリ)' を返す。"
+        "結果はアルファベット順にソートされる。"
+        "\n\n【エッジケース】"
+        "ディレクトリでないパスを指定した場合はエラーを返す。"
+        "存在しないパスを指定した場合はエラーを返す。"
+        "\n\n【glob_searchとの使い分け】"
+        "ディレクトリ直下の内容を確認する → list_directory。"
+        "特定パターンのファイルを再帰的に検索する"
+        "（例: 全Pythonファイル） → glob_search。"
+        "ファイル内容を検索する → grep_search。"
+        "\n\n【アンチパターン】"
+        "run_commandでls/dirを使う代わりに、このツールを使うこと。"
+        "ファイルパスを指定してはいけない"
+        "（ディレクトリパスのみ対応）。"
     )
     allowed_dirs: AllowedDirectories
     working_dir: WorkingDirectory | None = None
@@ -243,6 +323,29 @@ class GlobSearchTool(BaseTool):
     name: str = "glob_search"
     description: str = (
         "globパターンでファイルを検索する。patternにglobパターンを指定する。"
+        "\n\n【パターン例】"
+        "'**/*.py' → 全Pythonファイルを再帰的に検索。"
+        "'src/**/test_*.py' → src以下のテストファイルを検索。"
+        "'*.md' → カレントディレクトリ直下のMarkdownファイル。"
+        "'docs/**/*.md' → docs以下の全Markdownファイル。"
+        "'**/__init__.py' → 全パッケージの__init__.pyを検索。"
+        "\n\n【出力形式】"
+        "マッチしたファイルの相対パスを1行1件で返す。結果はアルファベット順にソートされる。"
+        "マッチするファイルがない場合はその旨のメッセージを返す。"
+        "結果は最大200件に制限される。"
+        "\n\n【エッジケース】"
+        "マッチするファイルがない場合はその旨のメッセージを返す。"
+        "結果が200件を超える場合は先頭200件のみ返す。"
+        "\n\n【grep_searchとの使い分け】"
+        "ファイル名やパスのパターンで検索する → glob_search。"
+        "ファイルの中身（コンテンツ）を検索する → grep_search。"
+        "例: 'test_*.py'というファイルを探す → glob_search。"
+        "例: 'class MyClass'という定義を探す → grep_search。"
+        "\n\n【アンチパターン】"
+        "run_commandでfind/lsを使う代わりに、"
+        "必ずこのツールを使うこと。"
+        "ファイル内容の検索にglob_searchを使ってはいけない"
+        "（grep_searchを使う）。"
     )
     allowed_dirs: AllowedDirectories
     working_dir: WorkingDirectory | None = None
@@ -277,8 +380,36 @@ class GrepSearchTool(BaseTool):
 
     name: str = "grep_search"
     description: str = (
-        "正規表現パターンでファイル内容を検索する。"
-        "patternに正規表現、pathに検索対象ディレクトリを指定する。"
+        "正規表現パターンでファイル内容を検索する。patternに正規表現パターン、pathに検索対象（ディレクトリまたは単一ファイル）を指定する。"
+        "\n\n【パラメータ】"
+        "pattern: 正規表現パターン（Python re モジュール準拠）。"
+        "path: 検索対象のディレクトリまたはファイルパス"
+        "（省略時はカレントディレクトリ）。"
+        "ディレクトリを指定した場合、配下の全テキストファイルを再帰的に検索する。"
+        "単一ファイルを指定した場合、そのファイル内のみ検索する。"
+        "\n\n【パターン例】"
+        "'class MyClass' → 特定クラスの定義を検索。"
+        "'def test_' → テスト関数を検索。"
+        "'import\\s+json' → json モジュールのインポートを検索。"
+        "'TODO|FIXME|HACK' → コード内の注釈を検索。"
+        "\n\n【出力形式】"
+        "'ファイルパス:行番号: マッチした行の内容' の形式で返す。"
+        "結果は最大200件に制限される。マッチがない場合はその旨のメッセージを返す。"
+        "\n\n【エッジケース】"
+        "マッチがない場合はその旨のメッセージを返す。"
+        "結果が200件を超える場合は先頭200件のみ返す"
+        "（パターンを絞り込んで再検索すること）。"
+        "無効な正規表現パターンの場合はエラーを返す。"
+        "\n\n【glob_searchとの使い分け】"
+        "ファイルの中身（コンテンツ）を検索する → grep_search。"
+        "ファイル名やパスのパターンで検索する → glob_search。"
+        "例: 'class MyClass'の定義箇所を探す → grep_search。"
+        "例: 'test_*.py'というファイルを探す → glob_search。"
+        "\n\n【アンチパターン】"
+        "run_commandでgrep/rg/ackを使う代わりに、"
+        "必ずこのツールを使うこと。"
+        "ファイル名パターン検索にgrep_searchを使ってはいけない"
+        "（glob_searchを使う）。"
     )
     allowed_dirs: AllowedDirectories
     working_dir: WorkingDirectory | None = None

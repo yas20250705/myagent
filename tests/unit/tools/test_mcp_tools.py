@@ -12,8 +12,10 @@ from myagent.tools.mcp_tools import (
     MCPClient,
     MCPManager,
     MCPToolWrapper,
+    _build_args_schema,
     _expand_env_vars,
     _mask_env,
+    _resolve_python_type,
 )
 from myagent.tools.registry import ToolRegistry
 
@@ -418,3 +420,94 @@ class TestMCPManager:
         result = await manager.test_server("nonexistent")
         assert result.connected is False
         assert result.error is not None
+
+
+class Test_resolve_python_type:
+    """_resolve_python_type のテスト."""
+
+    def test_string型を返す(self) -> None:
+        assert _resolve_python_type({"type": "string"}) is str
+
+    def test_integer型を返す(self) -> None:
+        assert _resolve_python_type({"type": "integer"}) is int
+
+    def test_number型を返す(self) -> None:
+        assert _resolve_python_type({"type": "number"}) is float
+
+    def test_boolean型を返す(self) -> None:
+        assert _resolve_python_type({"type": "boolean"}) is bool
+
+    def test_object型を返す(self) -> None:
+        assert _resolve_python_type({"type": "object"}) is dict
+
+    def test_array型でitemsなしはlist_strを返す(self) -> None:
+        result = _resolve_python_type({"type": "array"})
+        assert result == list[str]
+
+    def test_array型でitems_stringはlist_strを返す(self) -> None:
+        result = _resolve_python_type({"type": "array", "items": {"type": "string"}})
+        assert result == list[str]
+
+    def test_array型でitems_integerはlist_intを返す(self) -> None:
+        result = _resolve_python_type({"type": "array", "items": {"type": "integer"}})
+        assert result == list[int]
+
+    def test_typeなしのデフォルトはstr(self) -> None:
+        assert _resolve_python_type({}) is str
+
+
+class Test_build_args_schemaの配列型:
+    """_build_args_schema が配列型で items を含むスキーマを生成するテスト."""
+
+    def test_配列型フィールドのJSON_Schemaにitemsが含まれる(self) -> None:
+        mock_tool = MagicMock()
+        mock_tool.inputSchema = {
+            "type": "object",
+            "properties": {
+                "args": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "コマンド引数",
+                },
+                "name": {
+                    "type": "string",
+                    "description": "名前",
+                },
+            },
+            "required": ["name"],
+        }
+
+        schema_class = _build_args_schema("test_tool", mock_tool)
+        assert schema_class is not None
+
+        json_schema = schema_class.model_json_schema()
+        args_prop = json_schema["properties"]["args"]
+        # Optional型の場合 anyOf 構造になる
+        if "anyOf" in args_prop:
+            array_schema = next(s for s in args_prop["anyOf"] if s.get("type") == "array")
+        else:
+            array_schema = args_prop
+        assert array_schema["type"] == "array"
+        assert "items" in array_schema, "配列型に items フィールドが必須（Gemini API互換）"
+        assert array_schema["items"]["type"] == "string"
+
+    def test_配列型フィールドでitems未指定時はstringがデフォルト(self) -> None:
+        mock_tool = MagicMock()
+        mock_tool.inputSchema = {
+            "type": "object",
+            "properties": {
+                "paths": {
+                    "type": "array",
+                    "description": "パスリスト",
+                },
+            },
+            "required": ["paths"],
+        }
+
+        schema_class = _build_args_schema("test_tool", mock_tool)
+        assert schema_class is not None
+
+        json_schema = schema_class.model_json_schema()
+        paths_prop = json_schema["properties"]["paths"]
+        assert paths_prop["type"] == "array"
+        assert "items" in paths_prop

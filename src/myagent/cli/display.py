@@ -183,6 +183,59 @@ def confirm_action(tool_name: str, tool_input: dict[str, Any]) -> bool:
         console.print("[yellow]y, n, diff のいずれかを入力してください[/yellow]")
 
 
+def batch_confirm_action(
+    tool_items: list[tuple[str, dict[str, Any]]],
+) -> list[bool]:
+    """複数のツール実行を一括で確認する.
+
+    Args:
+        tool_items: (tool_name, tool_input) のリスト。
+
+    Returns:
+        各ツールの承認/拒否のboolリスト。
+    """
+    # 全ツールの詳細を一括表示
+    parts: list[Text] = []
+    header = f"確認が必要です（{len(tool_items)}件）\n\n"
+    parts.append(Text(header, style="bold yellow"))
+    for i, (tool_name, tool_input) in enumerate(tool_items, 1):
+        parts.append(Text(f"[{i}] ", style="bold"))
+        parts.append(_build_confirm_details(tool_name, tool_input))
+        parts.append(Text("\n"))
+
+    combined = Text()
+    for part in parts:
+        combined.append_text(part)
+
+    console.print(Panel(combined, border_style="yellow"))
+
+    while True:
+        prompt = (
+            "[bold]全て実行しますか？ "
+            "(y=全承認 / n=全拒否 / 番号=個別拒否 例:1,3): [/bold]"
+        )
+        raw = console.input(prompt)
+        response = raw.strip().lower()
+
+        if response in ("y", "yes"):
+            return [True] * len(tool_items)
+        if response in ("n", "no"):
+            return [False] * len(tool_items)
+
+        # 個別拒否: カンマ区切りの番号で拒否対象を指定
+        try:
+            deny_indices = {int(x.strip()) for x in response.split(",")}
+            results: list[bool] = []
+            for i in range(1, len(tool_items) + 1):
+                results.append(i not in deny_indices)
+            return results
+        except ValueError:
+            console.print(
+                "[yellow]y, n, または拒否する番号を"
+                "カンマ区切りで入力してください[/yellow]"
+            )
+
+
 def create_spinner(message: str = "処理中...") -> Status:
     """スピナーを作成する."""
     return console.status(message, spinner="dots")

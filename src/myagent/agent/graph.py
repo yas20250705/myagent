@@ -40,6 +40,57 @@ if TYPE_CHECKING:
 _MAX_RECENT_MESSAGES = 20
 _MAX_CONTENT_CHARS = 8000
 
+# ファイルパスを持つ書き込みツール（競合検出対象）
+_FILE_WRITE_TOOLS: frozenset[str] = frozenset({"write_file", "edit_file"})
+
+
+def _detect_file_conflicts(
+    tool_calls: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[list[dict[str, Any]]]]:
+    """並列実行するtool_calls間のファイル書き込み競合を検出する.
+
+    書き込みツール（write_file, edit_file）が同一ファイルに対して
+    複数呼び出される場合、それらを競合グループとして分離する。
+    読み取り専用ツールは競合対象外。
+
+    Args:
+        tool_calls: LLMが返したtool_callsのリスト。
+
+    Returns:
+        (non_conflict_calls, conflict_groups) のタプル。
+        - non_conflict_calls: 競合なしで並列実行可能なtool_calls
+        - conflict_groups: 同一ファイルへの書き込みが競合する
+          tool_callsのグループリスト。各グループは逐次実行が必要。
+    """
+    # 書き込みツールのfile_pathごとにtool_callsをグループ化
+    file_to_calls: dict[str, list[dict[str, Any]]] = {}
+    non_write_calls: list[dict[str, Any]] = []
+
+    for tc in tool_calls:
+        tool_name: str = tc.get("name", "")
+        tool_args: dict[str, Any] = tc.get("args", {})
+
+        if tool_name in _FILE_WRITE_TOOLS:
+            file_path = tool_args.get("file_path", "")
+            if file_path:
+                file_to_calls.setdefault(file_path, []).append(tc)
+            else:
+                non_write_calls.append(tc)
+        else:
+            non_write_calls.append(tc)
+
+    # 競合判定: 同一ファイルに2つ以上の書き込みがあるか
+    non_conflict_calls = list(non_write_calls)
+    conflict_groups: list[list[dict[str, Any]]] = []
+
+    for _file_path, calls in file_to_calls.items():
+        if len(calls) == 1:
+            non_conflict_calls.append(calls[0])
+        else:
+            conflict_groups.append(calls)
+
+    return non_conflict_calls, conflict_groups
+
 
 def _remove_orphaned_tool_messages(messages: list[BaseMessage]) -> list[BaseMessage]:
     """対応するtool_callsを持たないToolMessageを除去する.
@@ -117,6 +168,9 @@ def build_agent_graph(
     max_loops: int = 20,
     executor: Executor | None = None,
     confirm_callback: Callable[[str, dict[str, Any]], bool] | None = None,
+    batch_confirm_callback: (
+        Callable[[list[tuple[str, dict[str, Any]]]], list[bool]] | None
+    ) = None,
     tool_validator: ToolValidator | None = None,
     metrics: SessionMetrics | None = None,
 ) -> StateGraph[AgentState]:
@@ -128,6 +182,11 @@ def build_agent_graph(
         max_loops: 最大ループ回数。
         executor: ツール確認フローを管理するExecutor。Noneの場合は確認なし。
         confirm_callback: ユーザー確認を求めるコールバック。承認でTrue、拒否でFalse。
+        batch_confirm_callback: 複数ツール呼び出しの一括確認
+            コールバック。各tool_callの(name, args)リストを受け取り、
+            各要素の承認/拒否をboolリストで返す。
+            Noneの場合はconfirm_callbackで逐次確認。
+            確認対象が1件のみの場合もconfirm_callbackで逐次確認。
         tool_validator: ツールパラメータバリデーター。Noneの場合はバリデーションなし。
         metrics: セッションメトリクス。Noneの場合はメトリクス収集なし。
 
@@ -204,6 +263,8 @@ def build_agent_graph(
         denied_messages: list[ToolMessage] = []
         validation_error_messages: list[ToolMessage] = []
         approved_calls: list[dict[str, Any]] = []
+        # 確認が必要なtool_callsを一時保持（バッチ確認用）
+        needs_confirm_calls: list[dict[str, Any]] = []
 
         for tc in tool_calls:
             tool_name: str = tc["name"]
@@ -230,22 +291,46 @@ def build_agent_graph(
                 tool_name, tool_args
             )
             if needs_confirm:
-                cb = confirm_callback
-                approved = cb(tool_name, tool_args) if cb else True
-                if not approved:
-                    denied_messages.append(
-                        ToolMessage(
-                            content="ユーザーがこの操作を拒否しました。",
-                            tool_call_id=tool_call_id,
-                            name=tool_name,
+                needs_confirm_calls.append(tc)
+            else:
+                approved_calls.append(tc)
+
+        # 確認が必要なtool_callsの処理（バッチ or 逐次）
+        if needs_confirm_calls:
+            if batch_confirm_callback is not None and len(needs_confirm_calls) > 1:
+                # バッチ確認: 複数tool_callsを一括で確認
+                confirm_items = [(tc["name"], tc["args"]) for tc in needs_confirm_calls]
+                results = batch_confirm_callback(confirm_items)
+                for tc, is_approved in zip(needs_confirm_calls, results, strict=True):
+                    if is_approved:
+                        approved_calls.append(tc)
+                    else:
+                        denied_messages.append(
+                            ToolMessage(
+                                content="ユーザーがこの操作を拒否しました。",
+                                tool_call_id=tc["id"],
+                                name=tc["name"],
+                            )
                         )
-                    )
-                    continue
+            else:
+                # 逐次確認: 従来のconfirm_callbackで1つずつ確認
+                for tc in needs_confirm_calls:
+                    cb = confirm_callback
+                    approved = cb(tc["name"], tc["args"]) if cb else True
+                    if approved:
+                        approved_calls.append(tc)
+                    else:
+                        denied_messages.append(
+                            ToolMessage(
+                                content="ユーザーがこの操作を拒否しました。",
+                                tool_call_id=tc["id"],
+                                name=tc["name"],
+                            )
+                        )
 
-            approved_calls.append(tc)
-
-        # ユーザーが拒否した場合は即座にエージェントを停止する
-        if denied_messages:
+        # 全てのtool_callsが拒否された場合はエージェントを停止する
+        # 一部拒否の場合は承認済みcallsを実行して継続する
+        if denied_messages and not approved_calls:
             return {
                 "messages": messages + denied_messages,
                 "is_completed": True,
@@ -278,6 +363,7 @@ def build_agent_graph(
         return {
             "messages": messages
             + validation_error_messages
+            + denied_messages
             + new_messages
         }
 
@@ -306,6 +392,9 @@ class AgentRunner:
         max_loops: int = 20,
         executor: Executor | None = None,
         confirm_callback: Callable[[str, dict[str, Any]], bool] | None = None,
+        batch_confirm_callback: (
+            Callable[[list[tuple[str, dict[str, Any]]]], list[bool]] | None
+        ) = None,
         context_manager: ContextManager | None = None,
         prompt_manager: PromptManager | None = None,
         tool_registry: ToolRegistry | None = None,
@@ -319,6 +408,7 @@ class AgentRunner:
         self._max_loops = max_loops
         self._executor = executor
         self._confirm_callback = confirm_callback
+        self._batch_confirm_callback = batch_confirm_callback
         self._context_manager = context_manager
         self._prompt_manager = prompt_manager or PromptManager()
         self._skills_context = skills_context
@@ -336,6 +426,7 @@ class AgentRunner:
             max_loops,
             executor,
             confirm_callback,
+            batch_confirm_callback=batch_confirm_callback,
             tool_validator=tool_validator,
             metrics=self._metrics,
         )
