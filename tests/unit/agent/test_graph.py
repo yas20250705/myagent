@@ -234,6 +234,94 @@ class TestAgentRunnerのrun_with_events:
 
         assert events[0].event_type == "agent_error"
 
+    @pytest.mark.asyncio
+    async def test_LangGraphイベントで履歴が更新される(self) -> None:
+        from myagent.agent.events import AgentEvent
+
+        mock_model = MagicMock()
+        mock_model.bind_tools = MagicMock(return_value=mock_model)
+
+        final_msgs = [
+            SystemMessage(content="sys"),
+            HumanMessage(content="指示"),
+            AIMessage(content="回答"),
+        ]
+
+        async def mock_astream_events(*args, **kwargs):  # type: ignore[no-untyped-def]
+            yield {
+                "event": "on_chain_end",
+                "name": "LangGraph",
+                "data": {"output": {"messages": final_msgs}},
+            }
+
+        mock_compiled = MagicMock()
+        mock_compiled.astream_events = mock_astream_events
+
+        runner = AgentRunner(model=mock_model, tools=[], max_loops=5)
+        runner._compiled = mock_compiled
+
+        events: list[AgentEvent] = []
+        async for event in runner.run_with_events("テスト"):
+            events.append(event)
+
+        assert runner._history == final_msgs
+
+    @pytest.mark.asyncio
+    async def test_LangGraphイベントなしでもフォールバックで履歴が更新される(self) -> None:
+        from myagent.agent.events import AgentEvent
+
+        mock_model = MagicMock()
+        mock_model.bind_tools = MagicMock(return_value=mock_model)
+
+        fallback_msgs = [
+            SystemMessage(content="sys"),
+            HumanMessage(content="指示"),
+            AIMessage(content="回答"),
+        ]
+
+        async def mock_astream_events(*args, **kwargs):  # type: ignore[no-untyped-def]
+            # name が "LangGraph" ではないノードの on_chain_end
+            yield {
+                "event": "on_chain_end",
+                "name": "agent",
+                "data": {"output": {"messages": fallback_msgs}},
+            }
+
+        mock_compiled = MagicMock()
+        mock_compiled.astream_events = mock_astream_events
+
+        runner = AgentRunner(model=mock_model, tools=[], max_loops=5)
+        runner._compiled = mock_compiled
+
+        events: list[AgentEvent] = []
+        async for event in runner.run_with_events("テスト"):
+            events.append(event)
+
+        # フォールバックにより履歴が更新される
+        assert runner._history == fallback_msgs
+
+    @pytest.mark.asyncio
+    async def test_on_chain_endなしでは履歴が空のまま(self) -> None:
+        from myagent.agent.events import AgentEvent
+
+        mock_model = MagicMock()
+        mock_model.bind_tools = MagicMock(return_value=mock_model)
+
+        async def mock_astream_events(*args, **kwargs):  # type: ignore[no-untyped-def]
+            yield {"event": "on_chat_model_stream", "data": {}}
+
+        mock_compiled = MagicMock()
+        mock_compiled.astream_events = mock_astream_events
+
+        runner = AgentRunner(model=mock_model, tools=[], max_loops=5)
+        runner._compiled = mock_compiled
+
+        events: list[AgentEvent] = []
+        async for event in runner.run_with_events("テスト"):
+            events.append(event)
+
+        assert runner._history == []
+
 
 class Test_remove_orphaned_tool_messages:
     """_remove_orphaned_tool_messages 関数のテスト."""
@@ -308,10 +396,10 @@ class Test_remove_orphaned_tool_messages:
         )
         tool_x = ToolMessage(content="x", tool_call_id="tc-x", name="tool_x")
         tool_y = ToolMessage(content="y", tool_call_id="tc-y", name="tool_y")
-        # ai_with_toolsが切り捨て圏外になるよう、後続に20件以上追加
-        extra = [AIMessage(content=f"msg{i}") for i in range(20)]
+        # ai_with_toolsが切り捨て圏外になるよう、後続に30件以上追加
+        extra = [AIMessage(content=f"msg{i}") for i in range(30)]
 
-        # ai_with_tools + tool_x + tool_y + extra 23件 → 末尾20件に切り詰め
+        # ai_with_tools + tool_x + tool_y + extra 33件 → 末尾30件に切り詰め
         # → ai_with_toolsが失われ、tool_x, tool_yが孤立 → 除去される
         msgs = fixed + [ai_with_tools, tool_x, tool_y] + extra
         result = _truncate_messages(msgs)
@@ -342,38 +430,38 @@ class Test_truncate_messages:
         assert len(result) == 2
 
     def test_最大件数を超えた場合に切り詰める(self) -> None:
-        # SystemMessage + HumanMessage を固定枠として保持し、それ以降を20件に制限
+        # SystemMessage + HumanMessage を固定枠として保持し、それ以降を30件に制限
         fixed = [
             SystemMessage(content="sys"),
             HumanMessage(content="first"),
         ]
-        extra = [AIMessage(content=f"msg{i}") for i in range(25)]
+        extra = [AIMessage(content=f"msg{i}") for i in range(35)]
         msgs = fixed + extra
 
         result = _truncate_messages(msgs)
-        # fixed 2件 + 直近20件 = 22件
-        assert len(result) == 22
+        # fixed 2件 + 直近30件 = 32件
+        assert len(result) == 32
         # fixed が保持されている
         assert result[0].content == "sys"
         assert result[1].content == "first"
         # 直近のメッセージが含まれている
-        assert result[-1].content == "msg24"
+        assert result[-1].content == "msg34"
 
     def test_長いコンテンツは切り詰める(self) -> None:
-        long_content = "a" * 10000
+        long_content = "a" * 15000
         msgs = [AIMessage(content=long_content)]
         result = _truncate_messages(msgs)
-        assert len(result[0].content) < 10000  # type: ignore[arg-type]
+        assert len(result[0].content) < 15000  # type: ignore[arg-type]
         assert "省略" in str(result[0].content)
 
     def test_SystemMessageは固定枠として保持される(self) -> None:
         sys_msg = SystemMessage(content="sys")
-        extra = [AIMessage(content=f"msg{i}") for i in range(25)]
+        extra = [AIMessage(content=f"msg{i}") for i in range(35)]
         msgs = [sys_msg] + extra
 
         result = _truncate_messages(msgs)
-        # sys + 直近20件 = 21件
-        assert len(result) == 21
+        # sys + 直近30件 = 31件
+        assert len(result) == 31
         assert result[0].content == "sys"
 
 
@@ -596,31 +684,26 @@ class TestAgentNodeの内部ロジック:
         mock_model.bind_tools = MagicMock(return_value=bound_model)
         bound_model.ainvoke = AsyncMock(return_value=AIMessage(content=""))
 
-        graph = build_agent_graph(mock_model, [], max_loops=10)
+        # max_recovery_attempts=0 で回復を無効化（従来動作）
+        graph = build_agent_graph(
+            mock_model, [], max_loops=10, max_recovery_attempts=0
+        )
         compiled = graph.compile()
 
-        # 同一ツール呼び出しを2回持つメッセージ履歴
+        # 同一ツール呼び出しを3回持つメッセージ履歴（閾値=3）
+        same_call_base = {
+            "name": "read_file",
+            "args": {"path": "foo.py"},
+            "type": "tool_call",
+        }
         repeated_tool_msg = AIMessage(
-            content="",
-            tool_calls=[
-                {
-                    "name": "read_file",
-                    "args": {"path": "foo.py"},
-                    "id": "tc1",
-                    "type": "tool_call",
-                }
-            ],
+            content="", tool_calls=[{**same_call_base, "id": "tc1"}]
         )
         repeated_tool_msg2 = AIMessage(
-            content="",
-            tool_calls=[
-                {
-                    "name": "read_file",
-                    "args": {"path": "foo.py"},
-                    "id": "tc2",
-                    "type": "tool_call",
-                }
-            ],
+            content="", tool_calls=[{**same_call_base, "id": "tc2"}]
+        )
+        repeated_tool_msg3 = AIMessage(
+            content="", tool_calls=[{**same_call_base, "id": "tc3"}]
         )
 
         initial_state: AgentState = {
@@ -629,9 +712,10 @@ class TestAgentNodeの内部ロジック:
                 HumanMessage(content="test"),
                 repeated_tool_msg,
                 repeated_tool_msg2,
+                repeated_tool_msg3,
             ],
             "phase": "executing",
-            "loop_count": 2,
+            "loop_count": 3,
             "is_completed": False,
         }
 
@@ -641,6 +725,163 @@ class TestAgentNodeの内部ロジック:
         messages = result.get("messages", [])
         last_content = messages[-1].content if messages else ""
         assert "繰り返し" in str(last_content) or "中断" in str(last_content)
+
+
+class Testエラー回復フロー:
+    """agent_node の回復誘導フローのテスト."""
+
+    @pytest.mark.asyncio
+    async def test_ループ検知時に回復誘導が発生しneeds_recoveryがTrueになる(
+        self,
+    ) -> None:
+        mock_model = MagicMock()
+        bound_model = MagicMock()
+        mock_model.bind_tools = MagicMock(return_value=bound_model)
+        # 回復後のLLM応答（ツール呼び出しなし → 完了）
+        bound_model.ainvoke = AsyncMock(
+            return_value=AIMessage(content="代替アプローチで対処しました")
+        )
+
+        graph = build_agent_graph(
+            mock_model, [], max_loops=10, max_recovery_attempts=2
+        )
+        compiled = graph.compile()
+
+        same_call_base = {
+            "name": "read_file",
+            "args": {"path": "foo.py"},
+            "type": "tool_call",
+        }
+
+        initial_state: AgentState = {
+            "messages": [
+                SystemMessage(content="sys"),
+                HumanMessage(content="test"),
+                AIMessage(
+                    content="",
+                    tool_calls=[{**same_call_base, "id": "tc1"}],
+                ),
+                AIMessage(
+                    content="",
+                    tool_calls=[{**same_call_base, "id": "tc2"}],
+                ),
+                AIMessage(
+                    content="",
+                    tool_calls=[{**same_call_base, "id": "tc3"}],
+                ),
+            ],
+            "phase": "executing",
+            "loop_count": 3,
+            "is_completed": False,
+            "recovery_count": 0,
+            "failed_approaches": [],
+            "needs_recovery": False,
+        }
+
+        result = await compiled.ainvoke(initial_state)  # type: ignore[arg-type]
+
+        # 回復誘導後にLLMが応答し、最終的に完了する
+        assert result.get("is_completed") is not True or result.get("recovery_count", 0) >= 1
+        # recovery_countが増加していること
+        assert result.get("recovery_count", 0) >= 1
+
+    @pytest.mark.asyncio
+    async def test_回復上限到達でis_completedがTrueになる(self) -> None:
+        mock_model = MagicMock()
+        bound_model = MagicMock()
+        mock_model.bind_tools = MagicMock(return_value=bound_model)
+        bound_model.ainvoke = AsyncMock(return_value=AIMessage(content=""))
+
+        graph = build_agent_graph(
+            mock_model, [], max_loops=10, max_recovery_attempts=1
+        )
+        compiled = graph.compile()
+
+        same_call_base = {
+            "name": "read_file",
+            "args": {"path": "foo.py"},
+            "type": "tool_call",
+        }
+
+        initial_state: AgentState = {
+            "messages": [
+                SystemMessage(content="sys"),
+                HumanMessage(content="test"),
+                AIMessage(
+                    content="",
+                    tool_calls=[{**same_call_base, "id": "tc1"}],
+                ),
+                AIMessage(
+                    content="",
+                    tool_calls=[{**same_call_base, "id": "tc2"}],
+                ),
+                AIMessage(
+                    content="",
+                    tool_calls=[{**same_call_base, "id": "tc3"}],
+                ),
+            ],
+            "phase": "executing",
+            "loop_count": 3,
+            "is_completed": False,
+            "recovery_count": 1,  # 既に1回回復試行済み（上限1）
+            "failed_approaches": ["前回の失敗"],
+            "needs_recovery": False,
+        }
+
+        result = await compiled.ainvoke(initial_state)  # type: ignore[arg-type]
+
+        assert result.get("is_completed") is True
+        messages = result.get("messages", [])
+        last_ai_msgs = [m for m in messages if isinstance(m, AIMessage)]
+        last_content = last_ai_msgs[-1].content if last_ai_msgs else ""
+        assert "上限" in str(last_content) or "中断" in str(last_content)
+
+    @pytest.mark.asyncio
+    async def test_エラー繰り返し検知時に回復誘導が発生する(self) -> None:
+        mock_model = MagicMock()
+        bound_model = MagicMock()
+        mock_model.bind_tools = MagicMock(return_value=bound_model)
+        bound_model.ainvoke = AsyncMock(
+            return_value=AIMessage(content="別アプローチで対処しました")
+        )
+
+        graph = build_agent_graph(
+            mock_model, [], max_loops=10, max_recovery_attempts=2
+        )
+        compiled = graph.compile()
+
+        error_content = "Error: ファイルが見つかりません"
+        initial_state: AgentState = {
+            "messages": [
+                SystemMessage(content="sys"),
+                HumanMessage(content="test"),
+                ToolMessage(
+                    content=error_content,
+                    tool_call_id="1",
+                    name="read_file",
+                ),
+                ToolMessage(
+                    content=error_content,
+                    tool_call_id="2",
+                    name="read_file",
+                ),
+                ToolMessage(
+                    content=error_content,
+                    tool_call_id="3",
+                    name="read_file",
+                ),
+            ],
+            "phase": "executing",
+            "loop_count": 3,
+            "is_completed": False,
+            "recovery_count": 0,
+            "failed_approaches": [],
+            "needs_recovery": False,
+        }
+
+        result = await compiled.ainvoke(initial_state)  # type: ignore[arg-type]
+
+        assert result.get("recovery_count", 0) >= 1
 
 
 class TestAgentRunnerのContextManager統合:

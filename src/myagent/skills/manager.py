@@ -142,8 +142,9 @@ class SkillManager:
         scope_order = {"project": 0, "global": 1}
         candidates.sort(key=lambda m: (scope_order[m.scope], m.name))
 
-        # バジェット上限計算 (1トークン ≈ 0.5文字 として逆算)
-        max_chars = min(
+        # バジェット上限計算 (1トークン ≈ 2文字 として逆算)
+        # コンテキストウィンドウの2%を基本とし、最低でも16,000文字を確保する
+        max_chars = max(
             int(context_window_tokens * _SKILLS_BUDGET_RATIO * 2),
             _MAX_SKILLS_BUDGET_CHARS,
         )

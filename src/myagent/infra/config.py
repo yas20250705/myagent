@@ -29,7 +29,7 @@ class WebSearchConfig(BaseModel):
     timeout: int = Field(default=25, ge=1, le=120)
     default_num_results: int = Field(default=5, ge=1, le=50)
     fallback_enabled: bool = True
-    search_backends: list[str] = Field(default_factory=lambda: ["exa", "duckduckgo"])
+    search_backends: list[str] = Field(default_factory=lambda: ["duckduckgo"])
 
 
 class WebFetchConfig(BaseModel):
@@ -84,6 +84,7 @@ class AgentConfig(BaseModel):
     context_window_tokens: int = Field(default=128_000, ge=1_000)
     max_parallel_workers: int = Field(default=3, ge=1, le=10)
     max_parallel_tool_calls: int = Field(default=5, ge=1, le=20)
+    max_recovery_attempts: int = Field(default=2, ge=0, le=10)
 
 
 class SkillConfig(BaseModel):

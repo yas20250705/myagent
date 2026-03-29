@@ -93,3 +93,18 @@ secrets.json
 # uv local environment config
 uv.toml
 
+# Generated Office documents (Word, Excel)
+*.docx
+*.xlsx
+*.pptx
+
+# Web archive files (MHTML reference materials)
+*.mhtml
+
+# Temporary content JSON files generated during LLM sessions
+content*.json
+
+# Root-level ad-hoc generator scripts (created during LLM sessions)
+/generate_*.py
+/techlearn_*.py
+

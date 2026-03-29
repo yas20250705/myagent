@@ -11,6 +11,7 @@ import html as html_module
 import json
 import logging
 import re
+import ssl
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -518,8 +519,15 @@ class WebFetchTool(BaseTool):
         )
 
         try:
+            # 一部サーバー（政府系サイト等）はデフォルトの
+            # SSLコンテキストでハンドシェイクに失敗するため、
+            # より柔軟なTLS設定を使用する
+            ssl_ctx = ssl.create_default_context()
+            ssl_ctx.set_ciphers("DEFAULT:@SECLEVEL=1")
+            ssl_ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+
             with urllib.request.urlopen(
-                req, timeout=self.timeout_seconds
+                req, timeout=self.timeout_seconds, context=ssl_ctx
             ) as resp:
                 # レスポンスサイズチェック
                 cl_str = resp.headers.get(

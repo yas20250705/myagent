@@ -120,6 +120,37 @@ class TestSessionMetrics:
         assert summary["worker_details"] == []
 
 
+class TestSessionMetricsの回復メトリクス:
+    """SessionMetrics の回復メトリクスのテスト."""
+
+    def test_初期値はゼロ(self) -> None:
+        metrics = SessionMetrics()
+        assert metrics.recovery_attempts == 0
+        assert metrics.recovery_successes == 0
+
+    def test_回復試行の記録(self) -> None:
+        metrics = SessionMetrics()
+        metrics.record_recovery_attempt()
+        metrics.record_recovery_attempt()
+        assert metrics.recovery_attempts == 2
+
+    def test_回復成功の記録(self) -> None:
+        metrics = SessionMetrics()
+        metrics.record_recovery_attempt()
+        metrics.record_recovery_success()
+        assert metrics.recovery_attempts == 1
+        assert metrics.recovery_successes == 1
+
+    def test_サマリーに回復メトリクスが含まれる(self) -> None:
+        metrics = SessionMetrics()
+        metrics.record_recovery_attempt()
+        metrics.record_recovery_attempt()
+        metrics.record_recovery_success()
+        summary = metrics.summary()
+        assert summary["recovery_attempts"] == 2
+        assert summary["recovery_successes"] == 1
+
+
 class TestWorkerMetrics:
     """WorkerMetrics のテスト."""
 

@@ -19,6 +19,12 @@ console = Console()
 
 _active_spinner: Status | None = None
 
+# Web系ツールの折りたたみ結果を保持する
+_collapsed_web_results: list[tuple[str, str, bool]] = []
+
+# 概要表示のみにするツール名
+_WEB_TOOLS = frozenset({"websearch", "webfetch"})
+
 
 def _start_spinner(tool_name: str) -> None:
     """ツール実行中スピナーを開始する."""
@@ -62,13 +68,51 @@ def print_tool_start(tool_name: str, arguments: dict[str, object]) -> None:
     )
 
 
+def _summarize_web_result(tool_name: str, result: str) -> str:
+    """Web系ツールの結果を概要に縮約する."""
+    lines = result.splitlines()
+    if tool_name == "websearch":
+        # 検索結果: ヘッダー行 + 各結果のタイトル行のみ
+        summary_parts: list[str] = []
+        for line in lines:
+            # 「検索結果:」ヘッダーやフォールバック注記
+            if line.startswith("検索結果:") or line.startswith("(注:"):
+                summary_parts.append(line)
+            # 番号付きタイトル行 (e.g. "1. **タイトル**")
+            elif line and line[0].isdigit() and ". **" in line:
+                summary_parts.append(line)
+        if not summary_parts:
+            return lines[0] if lines else result
+        return "\n".join(summary_parts)
+    # webfetch: 最初の5行のみ
+    preview_lines = 5
+    if len(lines) <= preview_lines:
+        return result
+    return "\n".join(lines[:preview_lines]) + f"\n... ({len(lines) - preview_lines}行省略)"
+
+
 def print_tool_end(tool_name: str, result: str, is_success: bool = True) -> None:
     """ツール実行結果を表示する."""
     from rich.markup import escape
 
     style = "green" if is_success else "red"
     status = "OK" if is_success else "ERROR"
-    # 結果が長い場合はトランケート
+
+    # Web系ツールは概要のみ表示し、全文は保存
+    if tool_name in _WEB_TOOLS:
+        _collapsed_web_results.append((tool_name, result, is_success))
+        summary = _summarize_web_result(tool_name, result)
+        console.print(
+            Panel(
+                escape(summary)
+                + "\n[dim](Ctrl+O で全文を表示)[/dim]",
+                title=f"{escape(tool_name)} [{status}]",
+                border_style=style,
+            )
+        )
+        return
+
+    # 通常ツール: 長い場合はトランケート
     display_result = result
     lines = result.splitlines()
     if len(lines) > 20:
@@ -80,6 +124,31 @@ def print_tool_end(tool_name: str, result: str, is_success: bool = True) -> None
             border_style=style,
         )
     )
+
+
+def show_collapsed_web_results() -> None:
+    """保存されたWeb系ツール結果の全文を表示する."""
+    from rich.markup import escape
+
+    if not _collapsed_web_results:
+        console.print("[dim]表示するWeb結果はありません[/dim]")
+        return
+
+    for tool_name, result, is_success in _collapsed_web_results:
+        style = "green" if is_success else "red"
+        status = "OK" if is_success else "ERROR"
+        console.print(
+            Panel(
+                escape(result),
+                title=f"{escape(tool_name)} [{status}] (全文)",
+                border_style=style,
+            )
+        )
+
+
+def clear_collapsed_web_results() -> None:
+    """保存されたWeb系ツール結果をクリアする."""
+    _collapsed_web_results.clear()
 
 
 def print_error(message: str) -> None:

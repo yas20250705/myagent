@@ -294,26 +294,25 @@ class TestBuildSkillsContextSection:
     def test_budget_truncates_skills(self, tmp_path: Path) -> None:
         """バジェット超過時にスキルが切り詰められること."""
         project_dir = tmp_path / "skills"
-        # 長い説明を持つスキルを複数作成
-        for i in range(5):
-            _make_skill(project_dir, f"skill-{i:02d}", "x" * 500)
+        # 長い説明(1000文字)を持つスキルを20個作成
+        # 各行 ≈ 1020文字 × 20個 = 約20400文字 → 16000文字バジェットを超える
+        for i in range(20):
+            _make_skill(project_dir, f"skill-{i:02d}", "x" * 1000)
 
         manager = SkillManager(
             project_skills_dir=project_dir,
             global_skills_dir=tmp_path / "no-global",
         )
-        # context_window_tokens=800000 (16000 chars budget) では全部入る
+        # context_window_tokens=2000000 → max(80000, 16000) = 80000文字 → 全部入る
         full_section = manager.build_skills_context_section(
-            context_window_tokens=800_000
+            context_window_tokens=2_000_000
         )
-        assert all(f"skill-{i:02d}" in full_section for i in range(5))
+        assert all(f"skill-{i:02d}" in full_section for i in range(20))
 
-        # context_window_tokens=5000 では budget = min(5000*2%*2, 16000) = 200文字
-        # ヘッダー(約100文字) + 各スキル行(skill-XX + 500文字説明 = 500+文字)なので1つ目も入らない可能性あり
-        # 少なくとも全5スキルは入らない
+        # context_window_tokens=5000 → max(200, 16000) = 16000文字
+        # 20スキル × 約1020文字 = 約20400文字 > 16000 → 全部は入らない
         small_section = manager.build_skills_context_section(context_window_tokens=5000)
-        # 全スキルが入っていないこと
-        all_in = all(f"skill-{i:02d}" in small_section for i in range(5))
+        all_in = all(f"skill-{i:02d}" in small_section for i in range(20))
         assert not all_in
 
 

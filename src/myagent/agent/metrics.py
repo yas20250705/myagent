@@ -55,6 +55,8 @@ class SessionMetrics:
     tool_successes: int = 0
     tool_failures: int = 0
     steps: int = 0
+    recovery_attempts: int = 0
+    recovery_successes: int = 0
     tool_call_details: dict[str, ToolMetric] = field(default_factory=dict)
     worker_metrics: list[WorkerMetrics] = field(default_factory=list)
 
@@ -83,6 +85,14 @@ class SessionMetrics:
     def record_step(self) -> None:
         """ステップ（ループ1回）を記録する."""
         self.steps += 1
+
+    def record_recovery_attempt(self) -> None:
+        """回復試行を記録する."""
+        self.recovery_attempts += 1
+
+    def record_recovery_success(self) -> None:
+        """回復成功を記録する."""
+        self.recovery_successes += 1
 
     def record_worker(
         self,
@@ -146,6 +156,8 @@ class SessionMetrics:
             "tool_failures": self.tool_failures,
             "success_rate": self.success_rate,
             "steps": self.steps,
+            "recovery_attempts": self.recovery_attempts,
+            "recovery_successes": self.recovery_successes,
             "tool_details": tool_details,
             "worker_details": worker_details,
         }

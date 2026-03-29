@@ -150,6 +150,39 @@ class TestAgentConfigの並列ツール呼び出し設定:
         assert config.agent.max_parallel_tool_calls == 5
 
 
+class TestAgentConfigの回復試行設定:
+    """AgentConfig の max_recovery_attempts を検証する."""
+
+    def test_デフォルトmax_recovery_attemptsは2(self) -> None:
+        from myagent.infra.config import AgentConfig
+
+        config = AgentConfig()
+        assert config.max_recovery_attempts == 2
+
+    def test_max_recovery_attemptsをカスタム値で設定できる(self) -> None:
+        from myagent.infra.config import AgentConfig
+
+        config = AgentConfig(max_recovery_attempts=0)
+        assert config.max_recovery_attempts == 0
+
+        config = AgentConfig(max_recovery_attempts=5)
+        assert config.max_recovery_attempts == 5
+
+    def test_max_recovery_attemptsが範囲外でバリデーションエラー(self) -> None:
+        from pydantic import ValidationError
+
+        from myagent.infra.config import AgentConfig
+
+        with pytest.raises(ValidationError):
+            AgentConfig(max_recovery_attempts=-1)
+        with pytest.raises(ValidationError):
+            AgentConfig(max_recovery_attempts=11)
+
+    def test_AppConfigにmax_recovery_attemptsが含まれる(self) -> None:
+        config = AppConfig()
+        assert config.agent.max_recovery_attempts == 2
+
+
 class TestSkillConfigのデフォルト値:
     """SkillConfig のデフォルト値を検証する."""
 
@@ -360,12 +393,11 @@ class TestWebSearchConfigのフォールバック設定:
         config = WebSearchConfig()
         assert config.fallback_enabled is True
 
-    def test_デフォルトのsearch_backendsはexa_duckduckgo(
+    def test_デフォルトのsearch_backendsはduckduckgo(
         self,
     ) -> None:
         config = WebSearchConfig()
         assert config.search_backends == [
-            "exa",
             "duckduckgo",
         ]
 
@@ -380,7 +412,7 @@ class TestWebSearchConfigのフォールバック設定:
     def test_AppConfigにフォールバック設定が含まれる(self) -> None:
         config = AppConfig()
         assert config.web_search.fallback_enabled is True
-        assert "exa" in config.web_search.search_backends
+        assert "duckduckgo" in config.web_search.search_backends
 
     def test_save_load_でフォールバック設定が保持される(self, tmp_path: Path) -> None:
         original = AppConfig(

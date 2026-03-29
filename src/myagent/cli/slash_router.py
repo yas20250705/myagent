@@ -83,17 +83,19 @@ class SlashCommandRouter:
     # public API
     # ------------------------------------------------------------------
 
-    async def try_handle(self, user_input: str) -> bool:
+    async def try_handle(self, user_input: str) -> tuple[bool, str]:
         """スラッシュコマンドとして処理を試みる.
 
         Args:
             user_input: ユーザーの入力文字列（先頭 ``/`` 付き）。
 
         Returns:
-            管理コマンドとして処理できた場合 True。
+            (handled, output_text) のタプル。
+            handled: 管理コマンドとして処理できた場合 True。
+            output_text: コマンド出力のプレーンテキスト（会話履歴注入用）。
         """
         if not user_input.startswith("/") or user_input.startswith("//"):
-            return False
+            return False, ""
 
         try:
             tokens = shlex.split(user_input[1:])
@@ -101,22 +103,27 @@ class SlashCommandRouter:
             tokens = user_input[1:].split()
 
         if not tokens:
-            return False
+            return False, ""
 
         command_name = _COMMAND_ALIASES.get(tokens[0], tokens[0])
         if command_name not in _BUILTIN_COMMANDS:
-            return False
+            return False, ""
 
         rest = tokens[1:]
         positional, flags = _parse_flags(rest)
         sub = positional[0] if positional else ""
         args = positional[1:]
 
+        output_text = ""
         try:
-            await self._dispatch(command_name, sub, args, flags)
+            with console.capture() as capture:
+                await self._dispatch(command_name, sub, args, flags)
+            output_text = capture.get()
+            # 捕捉したテキストをコンソールにも表示する
+            console.print(output_text, end="", highlight=False)
         except Exception as exc:
             print_error(str(exc))
-        return True
+        return True, output_text
 
     def get_help_text(self) -> str:
         """管理コマンドのヘルプ Markdown テキストを返す."""

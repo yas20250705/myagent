@@ -13,7 +13,8 @@ from langchain_core.messages import AIMessage, ToolMessage
 if TYPE_CHECKING:
     from langchain_core.messages import BaseMessage
 
-_LOOP_DETECTION_WINDOW = 4
+_LOOP_DETECTION_WINDOW = 6
+_LOOP_CONSECUTIVE_THRESHOLD = 3
 _ERROR_REPETITION_THRESHOLD = 3
 
 
@@ -28,15 +29,20 @@ class Critic:
         self,
         messages: list[BaseMessage],
         window: int = _LOOP_DETECTION_WINDOW,
+        consecutive_threshold: int = _LOOP_CONSECUTIVE_THRESHOLD,
     ) -> bool:
         """同一ツール呼び出しの繰り返しを検知する.
 
         直近のAIメッセージのツール呼び出しシグネチャを比較し、
-        同一の呼び出しが連続している場合にTrueを返す。
+        同一の呼び出しが consecutive_threshold 回以上連続した場合にTrueを返す。
+
+        2回連続では検知しない（techlearnなどのリサーチ系スキルで同一URLを
+        複数ステップに渡って参照することがあるため）。
 
         Args:
             messages: 会話履歴。
             window: 検査するAIメッセージの最大件数。
+            consecutive_threshold: ループと判定する連続回数（デフォルト3）。
 
         Returns:
             無限ループを検知した場合True。
@@ -47,11 +53,11 @@ class Critic:
             if isinstance(msg, AIMessage) and bool(getattr(msg, "tool_calls", None))
         ]
 
-        if len(ai_msgs_with_tools) < 2:
+        if len(ai_msgs_with_tools) < consecutive_threshold:
             return False
 
         recent = ai_msgs_with_tools[-window:]
-        if len(recent) < 2:
+        if len(recent) < consecutive_threshold:
             return False
 
         def _signature(msg: AIMessage) -> str:
@@ -61,10 +67,16 @@ class Critic:
             ]
             return str(sorted(calls))
 
+        # 末尾から連続して同一シグネチャが続く回数をカウント
         last_sig = _signature(recent[-1])
-        prev_sig = _signature(recent[-2])
+        consecutive = 1
+        for msg in reversed(recent[:-1]):
+            if _signature(msg) == last_sig:
+                consecutive += 1
+            else:
+                break
 
-        return last_sig == prev_sig
+        return consecutive >= consecutive_threshold
 
     def detect_error_repetition(
         self,
@@ -94,10 +106,17 @@ class Critic:
             content = msg.content if isinstance(msg.content, str) else ""
             if not content:
                 continue
-            # エラーを示すキーワードを含むメッセージを対象とする
-            is_error = any(
+            # エラーを示すキーワードまたはstatusフィールドで判定する
+            is_error = getattr(msg, "status", None) == "error" or any(
                 keyword in content
-                for keyword in ("Error", "エラー", "失敗", "error", "Exception")
+                for keyword in (
+                    "Error",
+                    "エラー",
+                    "失敗",
+                    "error",
+                    "Exception",
+                    "禁止",
+                )
             )
             if not is_error:
                 continue
@@ -115,3 +134,62 @@ class Critic:
                 )
 
         return (False, "")
+
+    def build_recovery_message(
+        self,
+        detection_type: str,
+        detail: str,
+        failed_approaches: list[str] | None = None,
+    ) -> str:
+        """回復誘導メッセージを生成する.
+
+        パターン検知時に処理を中断するのではなく、
+        LLMに代替アプローチの検討を促すメッセージを生成する。
+
+        Args:
+            detection_type: 検知タイプ。"loop" または "error_repetition"。
+            detail: 検知されたパターンの詳細説明。
+            failed_approaches: これまでに失敗したアプローチのリスト。
+
+        Returns:
+            回復誘導メッセージ文字列。
+        """
+        if detection_type == "loop":
+            pattern_desc = (
+                f"同一ツール呼び出しの繰り返しが検知されました: {detail}"
+            )
+        elif detection_type == "error_repetition":
+            pattern_desc = f"同一エラーの繰り返しが検知されました: {detail}"
+        else:
+            pattern_desc = f"非生産的なパターンが検知されました: {detail}"
+
+        parts = [
+            "⚠️ 現在のアプローチはブロックされています。",
+            "",
+            f"**検知されたパターン**: {pattern_desc}",
+            "",
+        ]
+
+        if failed_approaches:
+            parts.append("**これまでに失敗したアプローチ**:")
+            for i, approach in enumerate(failed_approaches, 1):
+                parts.append(f"  {i}. {approach}")
+            parts.append("")
+            parts.append(
+                "上記のアプローチは既に失敗しています。"
+                "これらとは**異なる**代替アプローチを検討してください。"
+            )
+        else:
+            parts.append(
+                "同じ方法を再試行するのではなく、代替アプローチを検討してください。"
+            )
+
+        parts.extend([
+            "",
+            "**指示**: 別のアプローチを最大3つ提案し、"
+            "最も有望なものを試行してください。",
+            "例: 別のツールを使う、問題を段階的に分解する、"
+            "前提条件を確認する、別のファイルパスを試す等。",
+        ])
+
+        return "\n".join(parts)

@@ -558,7 +558,13 @@ myagent> /plugin enable my-plugin
 enabled_plugins = ["my-plugin", "another-plugin"]
 ```
 
+### plugin, skillsの保存先
+```toml
+c:/Users/<ユーザー名>/.myagent
+```
 ---
+
+
 
 ## 10. MCPサーバー連携
 

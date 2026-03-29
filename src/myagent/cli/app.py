@@ -9,18 +9,21 @@ from pathlib import Path
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import InMemoryHistory
+from prompt_toolkit.key_binding import KeyBindings
 
 from myagent.agent.executor import Executor
 from myagent.agent.graph import AgentRunner
 from myagent.agent.prompt_manager import PromptManager
 from myagent.cli.display import (
     batch_confirm_action,
+    clear_collapsed_web_results,
     confirm_action,
     console,
     handle_event,
     print_error,
     print_success,
     render_markdown,
+    show_collapsed_web_results,
 )
 from myagent.cli.slash_router import SlashCommandRouter
 from myagent.commands.manager import (
@@ -36,6 +39,54 @@ from myagent.skills.manager import SkillManager
 from myagent.skills.skill_tool import ActivateSkillTool
 from myagent.tools.mcp_tools import MCPManager
 from myagent.tools.registry import create_default_registry
+
+# スキル自動続行の設定
+_SKILL_MAX_AUTO_CONTINUES = 5
+_SKILL_CONTINUATION_PATTERNS = (
+    "よろしいですか",
+    "よろしければ",
+    "ご確認ください",
+    "教えてください",
+    "いかがでしょうか",
+    "どうしますか",
+    "お知らせください",
+    "ご要望があれば",
+    "ご希望",
+    "承認をいただければ",
+    "返答ください",
+)
+_SKILL_INCOMPLETE_PATTERNS = (
+    "以下のような",
+    "以下の構成",
+    "以下のコード",
+    "以下に示します",
+)
+_SKILL_CONTINUATION_PROMPT = (
+    "確認は不要です。スキルの次のステップに進んでください。\n\n"
+    "重要: ファイル生成が必要な場合は、以下の手順で実行してください:\n"
+    "1. テンプレートに generate_*.py スクリプトが存在する場合は、"
+    "JSONデータを write_file で作成し、run_command でスクリプトを実行する\n"
+    "2. スクリプトが存在しない場合は、write_file でPythonスクリプトを作成し、"
+    "run_command で実行する\n\n"
+    "テキストでコード例を出力するのではなく、"
+    "実際にツールを使ってファイルを生成してください。"
+)
+
+
+def _should_auto_continue_skill(runner: AgentRunner) -> bool:
+    """スキル実行中にLLMが確認質問やテキスト出力のみで止まったかを判定する."""
+    last_text = runner.get_last_ai_text()
+    if not last_text:
+        return False
+    # 末尾300文字を確認（確認質問は通常末尾にある）
+    tail = last_text[-300:]
+    if any(p in tail for p in _SKILL_CONTINUATION_PATTERNS):
+        return True
+    # テキスト出力のみ（ツール未使用）パターンを末尾500文字で検出
+    tail_long = last_text[-500:]
+    if any(p in tail_long for p in _SKILL_INCOMPLETE_PATTERNS):
+        return True
+    return False
 
 
 def _build_command_manager(config: AppConfig) -> CommandManager:
@@ -220,6 +271,7 @@ async def _create_runner(
         prompt_manager=prompt_manager,
         tool_registry=registry,
         max_parallel_workers=config.agent.max_parallel_workers,
+        max_recovery_attempts=config.agent.max_recovery_attempts,
         langsmith_project=config.langchain_project if config.langchain_tracing else "",
         skills_context=skills_context,
     )
@@ -311,7 +363,17 @@ async def run_repl(config: AppConfig) -> None:
     console.print()
     _show_startup_info(config)
 
-    session: PromptSession[str] = PromptSession(history=InMemoryHistory())
+    # Ctrl+O でWeb系ツール結果の全文を表示するキーバインド
+    bindings = KeyBindings()
+
+    @bindings.add("c-o")
+    def _show_web_details(event: object) -> None:
+        show_collapsed_web_results()
+
+    session: PromptSession[str] = PromptSession(
+        history=InMemoryHistory(),
+        key_bindings=bindings,
+    )
 
     runner, mcp_manager, skill_manager = await _create_runner(config)
     command_manager = _build_command_manager(config)
@@ -355,11 +417,15 @@ async def run_repl(config: AppConfig) -> None:
         # スラッシュなしでも受け付ける（例: "plugin list" → "/plugin list"）
         _slash_input = user_input if user_input.startswith("/") else f"/{user_input}"
         if not _slash_input.startswith("//"):
-            handled = await slash_router.try_handle(_slash_input)
+            handled, cmd_output = await slash_router.try_handle(_slash_input)
             if handled:
+                # コマンド出力を会話履歴に注入（後続ターンで参照可能に）
+                if cmd_output.strip():
+                    runner.inject_context(user_input, cmd_output.strip())
                 continue
 
         # スラッシュで始まる入力の処理（カスタムコマンド → スキル の順）
+        skill_name = None
         if user_input.startswith("/") and not user_input.startswith("//"):
             # 1. カスタムコマンドの解決を試みる
             cmd_input, cmd_name = _resolve_command_input(user_input, command_manager)
@@ -405,9 +471,25 @@ async def run_repl(config: AppConfig) -> None:
                 console.print(f"[cyan]スキル '{skill_name}' をアクティベート[/cyan]")
 
         try:
-            async for event in runner.run_with_events(effective_input):
-                handle_event(event)
-            console.print()  # 改行
+            # スキル自動続行: 確認質問で止まった場合に自動的に続行する
+            _auto_remaining = _SKILL_MAX_AUTO_CONTINUES if skill_name else 0
+            _current_input = effective_input
+
+            while True:
+                clear_collapsed_web_results()
+                async for event in runner.run_with_events(_current_input):
+                    handle_event(event)
+                console.print()  # 改行
+
+                # スキル自動続行判定
+                if _auto_remaining > 0 and _should_auto_continue_skill(runner):
+                    _auto_remaining -= 1
+                    console.print(
+                        "[dim]スキル自動続行中...[/dim]"
+                    )
+                    _current_input = _SKILL_CONTINUATION_PROMPT
+                    continue
+                break
         except KeyboardInterrupt:
             console.print("\n[yellow]中断しました[/yellow]")
         except Exception as e:

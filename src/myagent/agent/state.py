@@ -56,5 +56,8 @@ class AgentState(TypedDict, total=False):
     loop_count: int
     max_loops: int
     is_completed: bool
+    recovery_count: int
+    failed_approaches: list[str]
+    needs_recovery: bool
     final_answer: str
     error: str

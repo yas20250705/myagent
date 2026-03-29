@@ -56,26 +56,26 @@ class TestSlashCommandRouterTryHandle:
     async def test_スラッシュ以外の入力はFalseを返す(self) -> None:
         router = SlashCommandRouter(AppConfig())
         result = await router.try_handle("hello world")
-        assert result is False
+        assert result[0] is False
 
     @pytest.mark.asyncio
     async def test_ダブルスラッシュはFalseを返す(self) -> None:
         router = SlashCommandRouter(AppConfig())
         result = await router.try_handle("//escaped")
-        assert result is False
+        assert result[0] is False
 
     @pytest.mark.asyncio
     async def test_未知のコマンドはFalseを返す(self) -> None:
         router = SlashCommandRouter(AppConfig())
         result = await router.try_handle("/unknown-command")
-        assert result is False
+        assert result[0] is False
 
     @pytest.mark.asyncio
     async def test_pluginコマンドはTrueを返す(self) -> None:
         router = SlashCommandRouter(AppConfig())
         with patch.object(router, "_handle_plugin", new_callable=AsyncMock) as mock:
             result = await router.try_handle("/plugin list")
-            assert result is True
+            assert result[0] is True
             mock.assert_called_once_with("list", [], {})
 
     @pytest.mark.asyncio
@@ -83,7 +83,7 @@ class TestSlashCommandRouterTryHandle:
         router = SlashCommandRouter(AppConfig())
         with patch.object(router, "_handle_config", new_callable=AsyncMock) as mock:
             result = await router.try_handle("/config")
-            assert result is True
+            assert result[0] is True
             mock.assert_called_once()
 
     @pytest.mark.asyncio
@@ -93,7 +93,7 @@ class TestSlashCommandRouterTryHandle:
             router, "_handle_set_config", new_callable=AsyncMock
         ) as mock:
             result = await router.try_handle("/set-config --provider openai")
-            assert result is True
+            assert result[0] is True
             mock.assert_called_once()
 
     @pytest.mark.asyncio
@@ -101,7 +101,7 @@ class TestSlashCommandRouterTryHandle:
         router = SlashCommandRouter(AppConfig())
         with patch.object(router, "_handle_mcp", new_callable=AsyncMock) as mock:
             result = await router.try_handle("/mcp list")
-            assert result is True
+            assert result[0] is True
             mock.assert_called_once_with("list", [], {})
 
     @pytest.mark.asyncio
@@ -109,7 +109,7 @@ class TestSlashCommandRouterTryHandle:
         router = SlashCommandRouter(AppConfig())
         with patch.object(router, "_handle_skill", new_callable=AsyncMock) as mock:
             result = await router.try_handle("/skill list")
-            assert result is True
+            assert result[0] is True
             mock.assert_called_once_with("list", [], {})
 
     @pytest.mark.asyncio
@@ -117,7 +117,7 @@ class TestSlashCommandRouterTryHandle:
         router = SlashCommandRouter(AppConfig())
         with patch.object(router, "_handle_command", new_callable=AsyncMock) as mock:
             result = await router.try_handle("/command list")
-            assert result is True
+            assert result[0] is True
             mock.assert_called_once_with("list", [], {})
 
     @pytest.mark.asyncio
@@ -131,7 +131,7 @@ class TestSlashCommandRouterTryHandle:
         ):
             with patch("myagent.cli.slash_router.print_error") as mock_err:
                 result = await router.try_handle("/plugin list")
-                assert result is True
+                assert result[0] is True
                 mock_err.assert_called_once_with("テストエラー")
 
     @pytest.mark.asyncio
@@ -140,14 +140,14 @@ class TestSlashCommandRouterTryHandle:
         router = SlashCommandRouter(AppConfig())
         with patch.object(router, "_handle_plugin", new_callable=AsyncMock) as mock:
             result = await router.try_handle('/plugin install "unclosed')
-            assert result is True
+            assert result[0] is True
             mock.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_スラッシュのみの入力はFalseを返す(self) -> None:
         router = SlashCommandRouter(AppConfig())
         result = await router.try_handle("/")
-        assert result is False
+        assert result[0] is False
 
 
 # ---------------------------------------------------------------------------
@@ -163,7 +163,7 @@ class TestSlashCommandRouterSubcommandHelp:
         router = SlashCommandRouter(AppConfig())
         with patch("myagent.cli.slash_router.print_error") as mock_err:
             result = await router.try_handle("/plugin unknown-sub")
-            assert result is True
+            assert result[0] is True
             mock_err.assert_called_once()
             msg = mock_err.call_args[0][0]
             assert "使用可能なサブコマンド" in msg
@@ -173,7 +173,7 @@ class TestSlashCommandRouterSubcommandHelp:
         router = SlashCommandRouter(AppConfig())
         with patch("myagent.cli.slash_router.print_error") as mock_err:
             result = await router.try_handle("/skill")
-            assert result is True
+            assert result[0] is True
             mock_err.assert_called_once()
             msg = mock_err.call_args[0][0]
             assert "使用可能なサブコマンド" in msg

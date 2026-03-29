@@ -5,6 +5,7 @@ ReActパターンのエージェントを構築し、ツールバインドと最
 
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING, Any
 
@@ -29,6 +30,8 @@ from myagent.agent.tool_validator import ToolValidator
 from myagent.infra.context import ContextManager
 from myagent.infra.errors import MyAgentError
 
+logger = logging.getLogger(__name__)
+
 if TYPE_CHECKING:
     from collections.abc import Callable
 
@@ -37,8 +40,8 @@ if TYPE_CHECKING:
 
     from myagent.tools.registry import ToolRegistry
 
-_MAX_RECENT_MESSAGES = 20
-_MAX_CONTENT_CHARS = 8000
+_MAX_RECENT_MESSAGES = 30
+_MAX_CONTENT_CHARS = 12000
 
 # ファイルパスを持つ書き込みツール（競合検出対象）
 _FILE_WRITE_TOOLS: frozenset[str] = frozenset({"write_file", "edit_file"})
@@ -173,6 +176,7 @@ def build_agent_graph(
     ) = None,
     tool_validator: ToolValidator | None = None,
     metrics: SessionMetrics | None = None,
+    max_recovery_attempts: int = 2,
 ) -> StateGraph[AgentState]:
     """ReActエージェントのLangGraphステートマシンを構築する.
 
@@ -211,8 +215,41 @@ def build_agent_graph(
                 "is_completed": True,
             }
 
+        # needs_recovery フラグは返却時に常に False にリセット
+        recovery_count = state.get("recovery_count", 0)
+        failed_approaches = list(state.get("failed_approaches", []))
+
         if critic.detect_loop(messages):
-            loop_msg = "同一ツール呼び出しの繰り返しを検知しました。処理を中断します。"
+            if recovery_count < max_recovery_attempts:
+                detail = "同一ツール呼び出しが連続しています"
+                recovery_msg = critic.build_recovery_message(
+                    "loop", detail, failed_approaches or None
+                )
+                failed_approaches.append(
+                    "同一ツール呼び出しの繰り返し"
+                    f"（{recovery_count + 1}回目の回復試行）"
+                )
+                logger.info(
+                    "回復誘導 #%d: loop - %s",
+                    recovery_count + 1,
+                    detail,
+                )
+                if metrics is not None:
+                    metrics.record_recovery_attempt()
+                return {
+                    "messages": messages + [
+                        AIMessage(content=f"⚠️ パターン検知: {detail}"),
+                        HumanMessage(content=recovery_msg),
+                    ],
+                    "loop_count": loop_count,
+                    "recovery_count": recovery_count + 1,
+                    "failed_approaches": failed_approaches,
+                    "needs_recovery": True,
+                }
+            loop_msg = (
+                "同一ツール呼び出しの繰り返しを検知しました。"
+                f"回復試行が上限({max_recovery_attempts}回)に達したため、処理を中断します。"
+            )
             return {
                 "messages": messages + [AIMessage(content=loop_msg)],
                 "loop_count": loop_count,
@@ -222,8 +259,36 @@ def build_agent_graph(
         # エラー繰り返し検知
         error_detected, error_msg = critic.detect_error_repetition(messages)
         if error_detected:
+            if recovery_count < max_recovery_attempts:
+                recovery_msg = critic.build_recovery_message(
+                    "error_repetition", error_msg, failed_approaches or None
+                )
+                failed_approaches.append(
+                    f"同一エラーの繰り返し: {error_msg}"
+                    f"（{recovery_count + 1}回目の回復試行）"
+                )
+                logger.info(
+                    "回復誘導 #%d: error_repetition - %s",
+                    recovery_count + 1,
+                    error_msg,
+                )
+                if metrics is not None:
+                    metrics.record_recovery_attempt()
+                return {
+                    "messages": messages + [
+                        AIMessage(content=f"⚠️ パターン検知: {error_msg}"),
+                        HumanMessage(content=recovery_msg),
+                    ],
+                    "loop_count": loop_count,
+                    "recovery_count": recovery_count + 1,
+                    "failed_approaches": failed_approaches,
+                    "needs_recovery": True,
+                }
             return {
-                "messages": messages + [AIMessage(content=error_msg)],
+                "messages": messages + [AIMessage(content=(
+                    f"{error_msg} "
+                    f"回復試行が上限({max_recovery_attempts}回)に達したため、処理を中断します。"
+                ))],
                 "loop_count": loop_count,
                 "is_completed": True,
             }
@@ -232,16 +297,27 @@ def build_agent_graph(
 
         if metrics is not None:
             metrics.record_step()
+            # 回復後にツール呼び出しが成功した場合（回復成功とみなす）
+            has_tool_calls = (
+                hasattr(response, "tool_calls") and response.tool_calls
+            )
+            if recovery_count > 0 and has_tool_calls:
+                metrics.record_recovery_success()
 
         return {
             "messages": messages + [response],
             "loop_count": loop_count + 1,
+            "needs_recovery": False,
         }
 
     def should_continue(state: AgentState) -> str:
         """ツール呼び出しが必要か判定するルーティング関数."""
         if state.get("is_completed", False):
             return END
+
+        # 回復誘導後: LLMに再度考えさせるためagentノードに戻す
+        if state.get("needs_recovery", False):
+            return "agent"
 
         messages = state.get("messages", [])
         if not messages:
@@ -349,9 +425,16 @@ def build_agent_graph(
                 for msg in new_messages:
                     if isinstance(msg, ToolMessage):
                         content = msg.content if isinstance(msg.content, str) else ""
-                        is_error = any(
+                        is_error = getattr(msg, "status", None) == "error" or any(
                             kw in content
-                            for kw in ("Error", "エラー", "失敗", "error", "Exception")
+                            for kw in (
+                                "Error",
+                                "エラー",
+                                "失敗",
+                                "error",
+                                "Exception",
+                                "禁止",
+                            )
                         )
                         tool_name_for_metric = getattr(msg, "name", "") or ""
                         metrics.record_tool_call(
@@ -372,7 +455,9 @@ def build_agent_graph(
     graph.add_node("tools", tool_node_wrapper)
 
     graph.set_entry_point("agent")
-    graph.add_conditional_edges("agent", should_continue, {"tools": "tools", END: END})
+    graph.add_conditional_edges(
+        "agent", should_continue, {"tools": "tools", "agent": "agent", END: END}
+    )
     graph.add_edge("tools", "agent")
 
     return graph
@@ -399,6 +484,7 @@ class AgentRunner:
         prompt_manager: PromptManager | None = None,
         tool_registry: ToolRegistry | None = None,
         max_parallel_workers: int = 3,
+        max_recovery_attempts: int = 2,
         langsmith_project: str = "",
         skills_context: str = "",
     ) -> None:
@@ -429,6 +515,7 @@ class AgentRunner:
             batch_confirm_callback=batch_confirm_callback,
             tool_validator=tool_validator,
             metrics=self._metrics,
+            max_recovery_attempts=max_recovery_attempts,
         )
         self._compiled = self._graph.compile()
         # ターン間で引き継ぐメッセージ履歴（SystemMessage + 会話全体）
@@ -455,6 +542,45 @@ class AgentRunner:
     def clear_history(self) -> None:
         """会話履歴をリセットする."""
         self._history = []
+
+    def get_last_ai_text(self) -> str:
+        """最後のAIメッセージのテキストコンテンツを返す."""
+        for msg in reversed(self._history):
+            if isinstance(msg, AIMessage):
+                content = msg.content
+                if isinstance(content, str):
+                    return content
+                if isinstance(content, list):
+                    texts = [
+                        p.get("text", "")
+                        for p in content
+                        if isinstance(p, dict) and p.get("type") == "text"
+                    ]
+                    return "".join(texts)
+        return ""
+
+    def inject_context(self, user_text: str, assistant_text: str) -> None:
+        """会話履歴にコンテキスト情報を注入する.
+
+        スラッシュコマンドの出力など、エージェント外で生成された情報を
+        会話履歴に追加し、後続のターンで参照可能にする。
+
+        注入メッセージには明確なラベルを付与し、LLMが主タスクの文脈と
+        混同しないようにする。
+
+        Args:
+            user_text: ユーザー側のメッセージ（コマンド入力等）。
+            assistant_text: アシスタント側のメッセージ（コマンド出力等）。
+        """
+        labeled_user = (
+            f"[システム管理コマンドの実行（主タスクとは無関係）]\n{user_text}"
+        )
+        labeled_assistant = (
+            f"[システム管理コマンドの実行結果（参照情報のみ。"
+            f"主タスクの指示や文脈として扱わないこと）]\n{assistant_text}"
+        )
+        self._history.append(HumanMessage(content=labeled_user))
+        self._history.append(AIMessage(content=labeled_assistant))
 
     def _build_initial_messages(self, instruction: str) -> list[BaseMessage]:
         """履歴に新しいユーザー指示を加えた初期メッセージリストを生成する.
@@ -532,6 +658,9 @@ class AgentRunner:
             "phase": "planning",
             "loop_count": 0,
             "is_completed": False,
+            "recovery_count": 0,
+            "failed_approaches": [],
+            "needs_recovery": False,
         }
 
         try:
@@ -665,12 +794,16 @@ class AgentRunner:
             "phase": "planning",
             "loop_count": 0,
             "is_completed": False,
+            "recovery_count": 0,
+            "failed_approaches": [],
+            "needs_recovery": False,
         }
 
         _prompt_tokens = 0
         _completion_tokens = 0
         _model_name = ""
         _final_messages: list[BaseMessage] = []
+        _fallback_messages: list[BaseMessage] = []
 
         try:
             async for event in self._compiled.astream_events(
@@ -719,22 +852,43 @@ class AgentRunner:
                 elif kind == "on_tool_end":
                     name = event.get("name", "")
                     output = event.get("data", {}).get("output", "")
-                    output_str = str(output) if not isinstance(output, str) else output
+                    # ToolMessage等のオブジェクトから content を抽出する
+                    if isinstance(output, str):
+                        output_str = output
+                    elif hasattr(output, "content"):
+                        c = output.content
+                        output_str = c if isinstance(c, str) else str(c)
+                    else:
+                        output_str = str(output)
                     yield AgentEvent.tool_end(name, output_str)
 
                 elif kind == "on_chain_end":
-                    # name == "LangGraph" がトップレベルグラフの完了イベント
-                    # ノード単位の on_chain_end（name == "agent" 等）は除外
-                    if event.get("name") == "LangGraph":
-                        output = event.get("data", {}).get("output", {})
-                        if isinstance(output, dict):
-                            msgs = output.get("messages", [])
-                            if msgs:
+                    output = event.get("data", {}).get("output", {})
+                    if isinstance(output, dict):
+                        msgs = output.get("messages", [])
+                        if msgs:
+                            if event.get("name") == "LangGraph":
+                                # トップレベルグラフの完了イベント（最優先）
                                 _final_messages = msgs
+                            else:
+                                # ノード単位の完了イベント（フォールバック用）
+                                _fallback_messages = msgs
 
         except Exception as e:
             yield AgentEvent.agent_error(str(e))
             return
+
+        if not _final_messages and _fallback_messages:
+            logger.warning(
+                "LangGraph の on_chain_end イベントをキャプチャできませんでした。"
+                "フォールバックメッセージを使用します。"
+            )
+            _final_messages = _fallback_messages
+
+        if not _final_messages:
+            logger.warning(
+                "最終メッセージが空です。会話履歴が次のターンに引き継がれません。"
+            )
 
         self._update_history(_final_messages)
 
